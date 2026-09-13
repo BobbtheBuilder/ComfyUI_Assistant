@@ -8,7 +8,7 @@ across sessions.
 ![Tested with LM Studio](https://img.shields.io/badge/tested%20with-LM%20Studio-blue.svg)
 ![Feedback wanted](https://img.shields.io/badge/feedback-wanted-brightgreen.svg)
 
-<img src="Assistant.jpg" alt="The ComfyUI Assistant panel open over the graph editor" width="420">
+<img src="screenshot.jpg" alt="The ComfyUI Assistant panel open over the graph editor" width="420">
 
 > **⚠️ Tested with LM Studio only.**
 > The Ollama, OpenAI-compatible, and Anthropic providers are implemented but have **not been tested
