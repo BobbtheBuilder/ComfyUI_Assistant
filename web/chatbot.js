@@ -380,12 +380,6 @@ function buildUi() {
         <div class="ccb-view ccb-chat-view ccb-active">
           <div class="ccb-messages"></div>
           <div class="ccb-attachments" id="ccb-attachments"></div>
-          <div class="ccb-quick" id="ccb-quick">
-            <button data-quick="critique" title="Compare the last generated image with your prompt">Critique output vs prompt</button>
-            <button data-quick="from-image" title="Write a prompt from an input image">Write prompt from image</button>
-            <button data-quick="compact" title="Summarize older messages to free context">Compact chat</button>
-            <button data-quick="remember" title="Save a lesson from the last exchange">Remember correction</button>
-          </div>
           <div class="ccb-composer">
             <button class="ccb-attach-btn" id="ccb-attach" title="Attach image">&#128206;</button>
             <textarea class="ccb-input" rows="1" placeholder="Ask about your workflow..."></textarea>
@@ -705,9 +699,6 @@ function wireUi() {
     }
     event.target.value = "";
   });
-  for (const button of root.querySelectorAll("#ccb-quick button")) {
-    button.addEventListener("click", () => runQuickAction(button.dataset.quick));
-  }
 
   makeDraggable(fab, fab);
   makeDraggable(panel, header);
@@ -766,32 +757,50 @@ function makeDraggable(element, handle) {
     moved = false;
     const startX = event.clientX;
     const startY = event.clientY;
-    const originLeft = element.offsetLeft;
-    const originTop = element.offsetTop;
+    const rect = element.getBoundingClientRect();
+    const originLeft = rect.left;
+    const originTop = rect.top;
+    let pendingX = 0;
+    let pendingY = 0;
+    let frame = 0;
     handle.setPointerCapture(event.pointerId);
 
-    const onMove = (moveEvent) => {
-      const dx = moveEvent.clientX - startX;
-      const dy = moveEvent.clientY - startY;
-      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
-      element.style.left = `${originLeft + dx}px`;
-      element.style.top = `${originTop + dy}px`;
-      element.style.right = "auto";
-      element.style.bottom = "auto";
+    const applyTransform = () => {
+      frame = 0;
+      element.style.transform = `translate3d(${pendingX}px, ${pendingY}px, 0)`;
     };
-    const onUp = () => {
+    const onMove = (moveEvent) => {
+      pendingX = moveEvent.clientX - startX;
+      pendingY = moveEvent.clientY - startY;
+      if (!moved && (Math.abs(pendingX) > 4 || Math.abs(pendingY) > 4)) moved = true;
+      if (!frame) frame = requestAnimationFrame(applyTransform);
+    };
+    const finish = () => {
       handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointerup", finish);
+      handle.removeEventListener("pointercancel", finish);
+      if (frame) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+      }
+      if (moved) {
+        element.style.left = `${originLeft + pendingX}px`;
+        element.style.top = `${originTop + pendingY}px`;
+        element.style.right = "auto";
+        element.style.bottom = "auto";
+        persistPosition(element);
+      }
+      element.style.transform = "";
       if (handle === element) {
         element.dataset.dragged = moved ? "1" : "0";
         setTimeout(() => {
           element.dataset.dragged = "0";
         }, 0);
       }
-      persistPosition(element);
     };
     handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
   });
 }
 
@@ -1532,45 +1541,6 @@ async function gatherMentionedImages(text) {
     if (dataUrls.length >= 4) break;
   }
   return dataUrls;
-}
-
-async function runQuickAction(kind) {
-  if (state.busy) return;
-  if (kind === "critique") {
-    const last = await lastOutputImage();
-    if (!last) {
-      appendNotice("No generated image found yet. Run the workflow first.");
-      return;
-    }
-    await addAttachment({ name: `output: ${last.filename}`, url: last.url, source: "output" });
-    const prompts = listPromptNodes();
-    const positive = prompts.nodes.find((node) => node.role === "positive");
-    const promptText = positive?.current_text || "";
-    state.dom.input.value = `Does the attached generated image match my prompt? My current positive prompt is:\n"${promptText}"\n\nIf it does not match well, propose a refined prompt and offer to apply it.`;
-  } else if (kind === "from-image") {
-    const inputs = collectInputImages();
-    if (!inputs.length) {
-      appendNotice("No input image found in the workflow.");
-      return;
-    }
-    await addAttachment({ name: inputs[0].name, url: inputs[0].url, source: "input" });
-    state.dom.input.value =
-      "Write a detailed generation prompt that matches the attached input image. Then insert it into the positive prompt input.";
-  } else if (kind === "compact") {
-    try {
-      const done = await compactContext();
-      if (!done) appendNotice("Nothing to compact yet.");
-    } catch (error) {
-      appendNotice(`Compaction failed: ${error.message}`);
-    }
-    return;
-  } else if (kind === "remember") {
-    state.dom.input.value =
-      "Summarize the mistake I just corrected (or the preference I stated) as a short, general rule and save it with remember_lesson.";
-    state.dom.input.focus();
-    return;
-  }
-  state.dom.input.focus();
 }
 
 async function webSearch(query, count) {

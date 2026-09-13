@@ -42,6 +42,7 @@
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   user-select: none;
   touch-action: none;
+  will-change: transform;
 }
 
 #ccb-root .ccb-fab:active {
@@ -66,6 +67,7 @@
   border-radius: 12px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
   overflow: hidden;
+  will-change: transform;
 }
 
 #ccb-root .ccb-panel.ccb-open {
@@ -81,6 +83,7 @@
   border-bottom: 1px solid var(--ccb-border);
   cursor: move;
   user-select: none;
+  touch-action: none;
 }
 
 #ccb-root .ccb-title {
@@ -476,29 +479,6 @@
   color: #fff;
   font-size: 12px;
   cursor: pointer;
-}
-
-#ccb-root .ccb-quick {
-  display: flex;
-  gap: 6px;
-  padding: 6px 8px 0;
-  background: var(--ccb-bg-alt);
-  flex-wrap: wrap;
-}
-
-#ccb-root .ccb-quick button {
-  border: 1px solid var(--ccb-border);
-  background: var(--ccb-bg);
-  color: var(--ccb-muted);
-  border-radius: 999px;
-  padding: 3px 10px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-#ccb-root .ccb-quick button:hover {
-  color: var(--ccb-text);
-  border-color: var(--ccb-accent);
 }
 
 #ccb-root .ccb-attach-btn {
