@@ -5,5 +5,7 @@ kb_index.sqlite-*
 kb_cache/
 assistant_memory.sqlite
 assistant_memory.sqlite-*
+debug.log
+debug.log*
 __pycache__/
 *.pyc

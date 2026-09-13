@@ -364,6 +364,17 @@ def _refresh_counts() -> None:
         conn.close()
 
 
+def _debug_log(*args: Any, **kwargs: Any) -> None:
+    try:
+        try:
+            from . import debug
+        except ImportError:
+            import debug
+        debug.log(*args, **kwargs)
+    except Exception:
+        pass
+
+
 def build(force_official: bool = False, auto_official: bool = True, refresh_days: int = 7, delay: float = 0) -> None:
     if delay:
         time.sleep(delay)
@@ -372,6 +383,8 @@ def build(force_official: bool = False, auto_official: bool = True, refresh_days
             return
         _state["building"] = True
         _state["error"] = ""
+    started = time.time()
+    _debug_log("kb", "build.start", force_official=force_official, auto_official=auto_official)
     try:
         conn = _connect()
         try:
@@ -392,9 +405,19 @@ def build(force_official: bool = False, auto_official: bool = True, refresh_days
         _state["last_build"] = time.time()
         _state["last_build_iso"] = _iso(_state["last_build"])
         _set_progress("Ready")
+        _debug_log(
+            "kb",
+            "build.done",
+            ms=round((time.time() - started) * 1000),
+            chunks=_state.get("chunks"),
+            files=_state.get("files"),
+            official_chunks=_state.get("official_chunks"),
+            error=_state.get("error") or None,
+        )
     except Exception as exc:
         _set_progress("Failed")
         _state["error"] = str(exc)
+        _debug_log("kb", "build.error", level="error", error=str(exc))
     finally:
         with _lock:
             _state["building"] = False

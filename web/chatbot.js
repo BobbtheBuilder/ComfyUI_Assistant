@@ -344,6 +344,7 @@ const state = {
   relevantLessons: [],
   lessons: [],
   correctionHint: false,
+  debugBuffer: [],
   dom: {},
 };
 
@@ -584,6 +585,19 @@ function buildUi() {
               <button class="ccb-btn" id="ccb-kb-sync">Sync official docs</button>
             </div>
             <div class="ccb-kb-status" id="ccb-kb-status">Knowledge base: loading...</div>
+            <div class="ccb-field">
+              <label>Debug</label>
+              <label class="ccb-checkbox">
+                <input type="checkbox" id="ccb-debug-enabled" />
+                Enable debug logging (no personal data is recorded)
+              </label>
+            </div>
+            <div class="ccb-row">
+              <button class="ccb-btn" id="ccb-debug-copy">Copy report</button>
+              <button class="ccb-btn" id="ccb-debug-download">Download report</button>
+              <button class="ccb-btn" id="ccb-debug-clear">Clear log</button>
+            </div>
+            <div class="ccb-kb-status" id="ccb-debug-status">Debug: off</div>
             <div class="ccb-row">
               <button class="ccb-btn ccb-primary" id="ccb-save">Save</button>
               <button class="ccb-btn" id="ccb-test">Test connection</button>
@@ -673,6 +687,13 @@ function wireUi() {
   root.querySelector("#ccb-memory-clear").addEventListener("click", () =>
     updateMemory({ action: "clear" }).catch((error) => appendNotice(error.message)),
   );
+  root.querySelector("#ccb-debug-enabled").addEventListener("change", () => {
+    updateDebugStatus();
+    saveSettings();
+  });
+  root.querySelector("#ccb-debug-copy").addEventListener("click", () => copyDebugReport());
+  root.querySelector("#ccb-debug-download").addEventListener("click", () => downloadDebugReport());
+  root.querySelector("#ccb-debug-clear").addEventListener("click", () => clearDebugLog());
   root.querySelector("#ccb-model").addEventListener("change", () => {
     detectVision();
     detectContextWindow();
@@ -1263,6 +1284,7 @@ function layoutWorkflow(scope = "added") {
   });
   state.runArranged = true;
   centerOnNodes((graph._nodes || []).filter((node) => (useAdded ? addedIds.has(String(node.id)) : true)));
+  debugLog("graph", "layout", { scope: useAdded ? "added" : "all", node_count: (graph._nodes || []).length });
   return { ok: true, scope: useAdded ? "added" : "all", node_count: (graph._nodes || []).length };
 }
 
@@ -1327,16 +1349,16 @@ async function validateWorkflow() {
       orphans.push({ id: node.id, type: node.type, title: node.title || node.type });
     }
   }
-  return {
+  const report = {
     ok: unconnected.length === 0 && dangling.length === 0,
     unconnected_required: unconnected,
     dangling_links: dangling,
     orphans,
     counts: { unconnected: unconnected.length, dangling: dangling.length, orphans: orphans.length },
   };
-}
-
-function validationMessage(report) {
+  debugLog("graph", "validate", { ok: report.ok, ...report.counts });
+  return report;
+}function validationMessage(report) {
   const parts = [];
   if (report.unconnected_required.length) {
     parts.push("Unconnected required inputs:");
@@ -1812,6 +1834,7 @@ async function runAgentWithFixups() {
 
 async function runTool(name, args, toolCallId) {
   const notice = appendNotice(`\u25b6 ${name} ${truncate(safeStringify(args), 200)}`);
+  debugLog("tool", name, { arg_keys: Object.keys(args || {}) });
   let result;
   try {
     result = await executeTool(name, args || {});
@@ -1874,6 +1897,7 @@ async function streamAssistantReply() {
         toolCalls.push(event);
       } else if (event.type === "error") {
         bubble.classList.remove("ccb-typing");
+        debugLog("chat", "error", { error: event.error });
         throw new Error(event.error);
       }
     }
@@ -2005,6 +2029,122 @@ function truncate(text, length) {
   return value.length > length ? `${value.slice(0, length)}\u2026` : value;
 }
 
+const DEBUG_LIMIT = 300;
+
+function hashKey(value) {
+  const text = String(value || "");
+  let hash = 5381;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) + hash + text.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(16);
+}
+
+function debugEnabled() {
+  const box = state.dom.root?.querySelector("#ccb-debug-enabled");
+  if (box) return box.checked;
+  return state.config?.debug?.enabled === true;
+}
+
+function debugLog(category, event, data) {
+  if (!debugEnabled()) return;
+  try {
+    state.debugBuffer.push({
+      ts: new Date().toISOString(),
+      category: String(category),
+      event: String(event),
+      data: data || {},
+    });
+    if (state.debugBuffer.length > DEBUG_LIMIT) {
+      state.debugBuffer = state.debugBuffer.slice(-DEBUG_LIMIT);
+    }
+    updateDebugStatus();
+  } catch {
+    /* ignore */
+  }
+}
+
+function clientReport() {
+  return {
+    user_agent: navigator.userAgent,
+    session_key_hash: hashKey(state.sessionKey || ""),
+    message_count: state.messages.length,
+    vision: state.visionSupported,
+    context_window: state.contextWindow,
+    attachments: state.attachments.length,
+    events: state.debugBuffer.slice(-DEBUG_LIMIT),
+  };
+}
+
+function updateDebugStatus() {
+  const element = state.dom.root?.querySelector("#ccb-debug-status");
+  if (!element) return;
+  element.textContent = `Debug: ${debugEnabled() ? "on" : "off"} \u00b7 ${state.debugBuffer.length} client event(s) buffered`;
+}
+
+async function fetchDebugReport() {
+  const response = await api.fetchApi("/chatbot/debug/report", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client: clientReport() }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return payload.text || JSON.stringify(payload, null, 2);
+}
+
+async function copyDebugReport() {
+  try {
+    const text = await fetchDebugReport();
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const area = document.createElement("textarea");
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      area.remove();
+    }
+    setStatus("Debug report copied to clipboard.");
+  } catch (error) {
+    setStatus(`Copy failed: ${error.message}`);
+  }
+}
+
+async function downloadDebugReport() {
+  try {
+    const text = await fetchDebugReport();
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "comfyui-assistent-debug.txt";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setStatus("Debug report downloaded.");
+  } catch (error) {
+    setStatus(`Download failed: ${error.message}`);
+  }
+}
+
+async function clearDebugLog() {
+  state.debugBuffer = [];
+  try {
+    await api.fetchApi("/chatbot/debug/clear", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+  } catch {
+    /* best effort */
+  }
+  updateDebugStatus();
+  setStatus("Debug log cleared.");
+}
+
 function safeStringify(value, maxLength = 20000) {
   const seen = new WeakSet();
   let text;
@@ -2097,6 +2237,8 @@ function populateSettings() {
   setValue("#ccb-kb-enabled", String(kb.enabled !== false));
   setValue("#ccb-kb-auto-official", String(kb.auto_official !== false));
   setValue("#ccb-kb-refresh-days", kb.refresh_days ?? 7);
+  setChecked("#ccb-debug-enabled", config.debug?.enabled === true);
+  updateDebugStatus();
   updateVisionBadge();
   updateContextStatus();
   refreshKbStatus();
@@ -2110,6 +2252,15 @@ function setValue(selector, value) {
 function setPlaceholder(selector, value) {
   const element = state.dom.root.querySelector(selector);
   if (element) element.placeholder = value;
+}
+
+function setChecked(selector, value) {
+  const element = state.dom.root.querySelector(selector);
+  if (element) element.checked = value === true;
+}
+
+function isChecked(selector) {
+  return state.dom.root.querySelector(selector)?.checked === true;
 }
 
 function applyProviderDefaultUrl() {
@@ -2173,6 +2324,9 @@ function collectSettings() {
       enabled: get("#ccb-memory-enabled") === "true",
       auto_detect: get("#ccb-memory-autodetect") === "true",
       inject_limit: Number(get("#ccb-memory-limit")) || 8,
+    },
+    debug: {
+      enabled: isChecked("#ccb-debug-enabled"),
     },
   };
   const apiKey = get("#ccb-api-key");
@@ -2270,6 +2424,7 @@ async function detectVision() {
     state.visionSupported = null;
   }
   updateVisionBadge();
+  debugLog("vision", "detected", { vision: state.visionSupported });
 }
 
 async function refreshKbStatus() {
@@ -2374,6 +2529,7 @@ async function loadHistory() {
 
 async function switchSession(newKey) {
   if (!newKey || newKey === state.sessionKey) return;
+  debugLog("session", "switch", { key_hash: hashKey(newKey) });
   const previousKey = state.sessionKey;
   state.sessionKey = newKey;
   if (state.busy) {
@@ -2532,8 +2688,10 @@ async function prepareContext() {
   if (!budget) return;
   if (messagesTokens(buildMessages()) <= budget) return;
   try {
-    await compactContext();
+    const compacted = await compactContext();
+    debugLog("context", "compact", { compacted, budget });
   } catch (error) {
+    debugLog("context", "compact_error", { error: String(error?.message || error) });
     appendNotice(`Compaction failed: ${error.message}`);
   }
 }
@@ -2557,6 +2715,7 @@ async function detectContextWindow() {
     state.contextWindow = null;
   }
   updateContextStatus();
+  debugLog("context", "window", { window: state.contextWindow });
 }
 
 async function loadLessons() {
@@ -2678,6 +2837,12 @@ app.registerExtension({
   name: "ComfyUI.Assistent",
   async setup() {
     buildUi();
+    window.addEventListener("error", (event) => {
+      debugLog("ui", "error", { message: String(event.message || ""), line: event.lineno });
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      debugLog("ui", "unhandled_rejection", { reason: String(event.reason?.message || event.reason || "") });
+    });
     api.addEventListener("executed", ({ detail }) => {
       const images = detail?.output?.images;
       if (!Array.isArray(images) || !images.length) return;

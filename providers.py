@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any, AsyncIterator, Mapping
 
 import aiohttp
@@ -11,6 +12,17 @@ ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_TIMEOUT = 300.0
 
 DATA_URL_RE = re.compile(r"^data:(?P<media>[^;,]+);base64,(?P<data>.*)$", re.S)
+
+
+def _debug_log(*args: Any, **kwargs: Any) -> None:
+    try:
+        try:
+            from . import debug
+        except ImportError:
+            import debug
+        debug.log(*args, **kwargs)
+    except Exception:
+        pass
 
 
 def _base_url(config: Mapping[str, Any]) -> str:
@@ -290,21 +302,55 @@ async def _anthropic_chat(
 async def chat_events(
     config: Mapping[str, Any], messages: list[Mapping[str, Any]], tools: list[Mapping[str, Any]]
 ) -> AsyncIterator[dict[str, Any]]:
+    started = time.time()
+    first_text: float | None = None
+    _debug_log(
+        "provider",
+        "chat.start",
+        provider=config.get("provider"),
+        model=config.get("model"),
+        messages=len(messages),
+        tools=len(tools),
+        native_tools=config.get("use_native_tools", True),
+        temperature=config.get("temperature"),
+        max_tokens=config.get("max_tokens"),
+    )
     if not config.get("model"):
         yield {"type": "error", "error": "No model selected. Open settings and choose a model."}
         return
     if not config.get("use_native_tools", True) and tools:
         messages = _with_system_protocol(messages, tools)
-    try:
+
+    async def _relay() -> AsyncIterator[dict[str, Any]]:
+        nonlocal first_text
         if _is_anthropic(config):
-            async for event in _anthropic_chat(config, messages, tools):
-                yield event
+            stream = _anthropic_chat(config, messages, tools)
         else:
-            async for event in _openai_chat(config, messages, tools):
-                yield event
+            stream = _openai_chat(config, messages, tools)
+        async for event in stream:
+            kind = event.get("type")
+            if kind == "text" and first_text is None:
+                first_text = time.time()
+                _debug_log("provider", "chat.first_token", ms=round((first_text - started) * 1000))
+            elif kind == "done":
+                _debug_log(
+                    "provider",
+                    "chat.done",
+                    finish_reason=event.get("finish_reason"),
+                    ms=round((time.time() - started) * 1000),
+                )
+            elif kind == "error":
+                _debug_log("provider", "chat.error", level="error", error=event.get("error"))
+            yield event
+
+    try:
+        async for event in _relay():
+            yield event
     except aiohttp.ClientError as exc:
+        _debug_log("provider", "chat.error", level="error", error=f"client error: {exc}")
         yield {"type": "error", "error": f"Could not reach provider: {exc}"}
     except asyncio.TimeoutError:
+        _debug_log("provider", "chat.error", level="error", error="timeout")
         yield {"type": "error", "error": "Provider request timed out."}
 
 

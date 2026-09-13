@@ -7,7 +7,7 @@ from typing import Any, Mapping
 from aiohttp import web
 from server import PromptServer
 
-from . import installer, kb, memory, providers, websearch
+from . import debug, installer, kb, memory, providers, websearch
 from .config_store import CONFIG_STORE
 
 routes = PromptServer.instance.routes
@@ -127,6 +127,15 @@ async def chat(request: web.Request) -> web.StreamResponse:
     messages = payload.get("messages", [])
     tools = payload.get("tools", [])
     config = _effective_config(payload)
+    debug.log(
+        "route",
+        "chat.request",
+        provider=config.get("provider"),
+        model=config.get("model"),
+        messages=len(messages),
+        tools=len(tools),
+        native_tools=config.get("use_native_tools", True),
+    )
 
     response = web.StreamResponse(headers={"Content-Type": "application/x-ndjson", "Cache-Control": "no-cache"})
     await response.prepare(request)
@@ -135,10 +144,13 @@ async def chat(request: web.Request) -> web.StreamResponse:
             try:
                 await response.write((json.dumps(event) + "\n").encode("utf-8"))
             except ConnectionResetError:
+                debug.log("route", "chat.disconnect")
                 return response
     except ConnectionResetError:
+        debug.log("route", "chat.disconnect")
         return response
     except Exception as exc:
+        debug.log("route", "chat.error", level="error", error=str(exc))
         try:
             await response.write((json.dumps({"type": "error", "error": str(exc)}) + "\n").encode("utf-8"))
         except ConnectionResetError:
@@ -176,6 +188,16 @@ async def install_git(request: web.Request) -> web.Response:
     if not url:
         return web.json_response({"error": "Missing repository URL."}, status=400)
     result = await asyncio.to_thread(installer.git_install, url, payload.get("name"), payload.get("run_pip", True))
+    debug.log(
+        "install",
+        "git_install.done",
+        level="info" if result.get("ok") else "error",
+        url=url,
+        name=payload.get("name"),
+        ok=bool(result.get("ok")),
+        pip_ok=result.get("pip_ok"),
+        error=result.get("error"),
+    )
     return web.json_response(result, status=200 if result.get("ok") else 400)
 
 
@@ -247,10 +269,7 @@ async def docs_node(request: web.Request) -> web.Response:
 @routes.get("/chatbot/memory")
 async def memory_list(_request: web.Request) -> web.Response:
     lessons = await asyncio.to_thread(memory.list_lessons)
-    return web.json_response({"lessons": lessons})
-
-
-@routes.post("/chatbot/memory")
+    return web.json_response({"lessons": lessons})@routes.post("/chatbot/memory")
 async def memory_update(request: web.Request) -> web.Response:
     try:
         payload = await request.json()
@@ -312,3 +331,21 @@ async def memory_relevant(request: web.Request) -> web.Response:
         memory.relevant, str(payload.get("query") or ""), int(payload.get("limit") or 8)
     )
     return web.json_response({"lessons": lessons})
+
+
+@routes.post("/chatbot/debug/report")
+async def debug_report(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        payload = {}
+    client = payload.get("client") if isinstance(payload.get("client"), dict) else None
+    bundle = await asyncio.to_thread(debug.report, client)
+    bundle["text"] = debug.report_text(bundle)
+    return web.json_response(bundle)
+
+
+@routes.post("/chatbot/debug/clear")
+async def debug_clear(_request: web.Request) -> web.Response:
+    await asyncio.to_thread(debug.clear)
+    return web.json_response({"ok": True})

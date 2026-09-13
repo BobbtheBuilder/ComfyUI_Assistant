@@ -572,3 +572,18 @@
   padding: 3px 8px;
   font-size: 11px;
 }
+
+#ccb-root .ccb-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ccb-text);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+#ccb-root .ccb-checkbox input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}

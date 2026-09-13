@@ -89,6 +89,9 @@ DEFAULTS: dict[str, Any] = {
         "auto_detect": True,
         "inject_limit": 8,
     },
+    "debug": {
+        "enabled": False,
+    },
 }
 
 
@@ -166,6 +169,10 @@ class ConfigStore:
             config = deepcopy(self._config)
         config["base_url"] = config.get("base_url") or DEFAULT_BASE_URLS.get(config["provider"], "")
         return config
+
+    def is_debug_enabled(self) -> bool:
+        with self._lock:
+            return bool(self._config.get("debug", {}).get("enabled"))
 
     def history(self, key: str = "__default__") -> list[Any]:
         stored = _read_json(self._history_path)

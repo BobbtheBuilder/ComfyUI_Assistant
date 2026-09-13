@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+__version__ = "0.1.0"
+
 from . import kb
 from . import routes as _routes  # noqa: F401 - route registration is the import side effect.
 from .config_store import CONFIG_STORE
@@ -16,4 +18,4 @@ if _kb_config.get("enabled", True):
         delay=20,
     )
 
-__all__ = ["WEB_DIRECTORY", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["__version__", "WEB_DIRECTORY", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
