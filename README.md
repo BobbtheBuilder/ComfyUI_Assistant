@@ -1,4 +1,4 @@
-# ComfyUI Assistent
+# ComfyUI Assistant
 
 A floating chat assistant embedded in the ComfyUI graph editor. It can read and edit your workflow,
 see your input/output images, search a local documentation knowledge base, and remember corrections
@@ -8,12 +8,12 @@ across sessions.
 ![Tested with LM Studio](https://img.shields.io/badge/tested%20with-LM%20Studio-blue.svg)
 ![Feedback wanted](https://img.shields.io/badge/feedback-wanted-brightgreen.svg)
 
-<img src="Assistent.jpg" alt="The ComfyUI Assistent panel open over the graph editor" width="420">
+<img src="Assistant.jpg" alt="The ComfyUI Assistant panel open over the graph editor" width="420">
 
 > **⚠️ Tested with LM Studio only.**
 > The Ollama, OpenAI-compatible, and Anthropic providers are implemented but have **not been tested
 > yet**. If you try one and it works — or breaks — please tell me via
-> [GitHub Issues](https://github.com/BobbtheBuilder/ComfyUI_Assistent/issues). Feedback is very
+> [GitHub Issues](https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues). Feedback is very
 > welcome.
 
 ## Contents
@@ -103,12 +103,12 @@ across sessions.
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/BobbtheBuilder/ComfyUI_Assistent
+git clone https://github.com/BobbtheBuilder/ComfyUI_Assistant
 ```
 
 **Option B — ComfyUI-Manager**
 
-Manager → *Install via Git URL* → `https://github.com/BobbtheBuilder/ComfyUI_Assistent`
+Manager → *Install via Git URL* → `https://github.com/BobbtheBuilder/ComfyUI_Assistant`
 
 Then:
 1. Restart ComfyUI.
@@ -143,7 +143,7 @@ Default base URLs:
 | Anthropic | ⚠️ Untested | Messages API with tool use and image blocks. |
 
 If you test an untested provider, please open an issue with what worked and what didn't:
-https://github.com/BobbtheBuilder/ComfyUI_Assistent/issues
+https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 ## Usage
 
@@ -191,7 +191,7 @@ The assistant calls tools as needed; you'll see each call in the activity log. D
 
 ## Files and data
 
-All of these live in `custom_nodes/ComfyUI_Assistent/` and are gitignored:
+All of these live in `custom_nodes/ComfyUI_Assistant/` and are gitignored:
 
 | File | Purpose |
 | --- | --- |
@@ -209,7 +209,7 @@ Version 0.1.0 added a privacy-first debug system:
 1. Open **Settings → Debug** and tick **Enable debug logging**, then reproduce the problem.
 2. Click **Copy report** (copies to clipboard) or **Download report** (saves
    `comfyui-assistent-debug.txt`).
-3. Attach it to a [GitHub issue](https://github.com/BobbtheBuilder/ComfyUI_Assistent/issues).
+3. Attach it to a [GitHub issue](https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues).
 
 **What the report contains:** app/ComfyUI/Python versions, provider and model, feature flags, KB
 status, memory count, HTTP statuses, timings, and error messages.
@@ -242,4 +242,4 @@ If you use this code, please keep the copyright and license notice.
 ## Feedback
 
 Bug reports, provider test results, and feature ideas are welcome:
-https://github.com/BobbtheBuilder/ComfyUI_Assistent/issues
+https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues

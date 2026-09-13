@@ -325,7 +325,7 @@ def fetch_official(force: bool = False) -> bool:
     if not force and os.path.isfile(OFFICIAL_PATH) and _meta_get("official_fetched_at"):
         return False
     os.makedirs(CACHE_DIR, exist_ok=True)
-    request = urllib.request.Request(OFFICIAL_URL, headers={"User-Agent": "ComfyUI-Assistent-KB"})
+    request = urllib.request.Request(OFFICIAL_URL, headers={"User-Agent": "ComfyUI-Assistant-KB"})
     _set_progress("Downloading official docs", 0, 0)
     with urllib.request.urlopen(request, timeout=120) as response:
         total_bytes = int(response.headers.get("Content-Length") or 0)
@@ -437,7 +437,7 @@ def start_background(
             "refresh_days": refresh_days,
             "delay": delay,
         },
-        name="ComfyUIAssistentKB",
+        name="ComfyUIAssistantKB",
         daemon=True,
     )
     thread.start()

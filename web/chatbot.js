@@ -365,10 +365,10 @@ function el(tag, props = {}, children = []) {
 function buildUi() {
   const root = el("div", { id: "ccb-root" });
   root.innerHTML = `
-    <button class="ccb-fab" title="ComfyUI Assistent (drag to move)">&#128172;</button>
+    <button class="ccb-fab" title="ComfyUI Assistant (drag to move)">&#128172;</button>
     <div class="ccb-panel">
       <div class="ccb-header">
-        <span class="ccb-title">ComfyUI Assistent</span>
+        <span class="ccb-title">ComfyUI Assistant</span>
         <div class="ccb-tabs">
           <button class="ccb-tab ccb-active" data-tab="chat">Chat</button>
           <button class="ccb-tab" data-tab="settings">Settings</button>
@@ -2834,7 +2834,7 @@ function lessonsContext() {
 }
 
 app.registerExtension({
-  name: "ComfyUI.Assistent",
+  name: "ComfyUI.Assistant",
   async setup() {
     buildUi();
     window.addEventListener("error", (event) => {

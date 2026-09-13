@@ -11,7 +11,7 @@ CONFIG_PATH = os.path.join(NODE_DIR, "chatbot_config.json")
 HISTORY_PATH = os.path.join(NODE_DIR, "chatbot_history.json")
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are the ComfyUI Assistent, an assistant embedded in the user's ComfyUI graph editor. "
+    "You are the ComfyUI Assistant, an assistant embedded in the user's ComfyUI graph editor. "
     "You can inspect and edit the active workflow, search the local documentation knowledge base, "
     "and search the web. "
     "Use the provided tools to read the workflow, inspect nodes, add or remove nodes, connect "

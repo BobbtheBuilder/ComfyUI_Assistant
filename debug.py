@@ -224,7 +224,7 @@ def report(client: Any = None) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _iso(),
-        "app": {"name": "ComfyUI Assistent", "version": _app_version(), "debug_enabled": _enabled()},
+        "app": {"name": "ComfyUI Assistant", "version": _app_version(), "debug_enabled": _enabled()},
         "env": _env(),
         "config": _config_summary(),
         "kb": _kb_summary(),
@@ -237,7 +237,7 @@ def report(client: Any = None) -> dict[str, Any]:
 
 def report_text(bundle: dict[str, Any]) -> str:
     lines = [
-        "ComfyUI Assistent debug report",
+        "ComfyUI Assistant debug report",
         f"generated: {bundle.get('generated_at')}  schema: {bundle.get('schema_version')}  debug: {(bundle.get('app') or {}).get('debug_enabled')}",
         f"app: {(bundle.get('app') or {}).get('name')} {(bundle.get('app') or {}).get('version')}",
         f"env: {json.dumps(bundle.get('env', {}))}",
