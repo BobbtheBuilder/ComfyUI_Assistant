@@ -92,6 +92,10 @@ DEFAULTS: dict[str, Any] = {
     "unload": {
         "on_execute": True,
     },
+    "console": {
+        "enabled": True,
+        "lines": 500,
+    },
     "debug": {
         "enabled": False,
     },

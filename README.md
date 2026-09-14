@@ -179,6 +179,7 @@ The assistant calls tools as needed; you'll see each call in the activity log. D
 | Max tokens | 2048 | Max completion tokens per reply. |
 | Native tool calling | On | Off = model emits fenced JSON actions (for tool-less models). |
 | Unload the LLM when I run a workflow | On | Unload local model instances when a workflow starts (LM Studio / Ollama). |
+| Let the assistant read the ComfyUI console | On | Exposes `get_console_log` so the model can read recent server console output on request. |
 | System prompt | built-in | Instruction preamble. Use **Reset to default** to restore the built-in prompt. |
 | Vision | auto | Detected per model; shown read-only. |
 | Web search provider / key / results | Tavily / empty / 5 | Tavily, Brave, or SerpAPI. |
@@ -216,8 +217,13 @@ Version 0.1.0 added a privacy-first debug system:
 
 1. Open **Settings → Debug** and tick **Enable debug logging**, then reproduce the problem.
 2. Click **Copy report** (copies to clipboard) or **Download report** (saves
-   `comfyui-assistent-debug.txt`).
+   `comfyui-assistant-debug.txt`).
 3. Attach it to a [GitHub issue](https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues).
+
+For live run failures, the assistant can read the ComfyUI **server console** on demand via the
+`get_console_log` tool (recent lines, optionally errors/warnings only). It only reads the console
+when you ask it to, results are scrubbed like the report, and the feature has its own toggle
+(Settings → **Let the assistant read the ComfyUI console**).
 
 **What the report contains:** app/ComfyUI/Python versions, provider and model, feature flags, KB
 status, memory count, HTTP statuses, timings, and error messages.

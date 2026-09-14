@@ -305,6 +305,22 @@ const TOOLS = [
   {
     type: "function",
     function: {
+      name: "get_console_log",
+      description:
+        "Read recent ComfyUI server console output (last N lines), optionally only errors/warnings. Use this to diagnose failed runs, missing nodes, or tracebacks.",
+      parameters: {
+        type: "object",
+        properties: {
+          lines: { type: "integer", description: "How many recent lines, default 500" },
+          level: { type: "string", enum: ["error", "warning"], description: "Optional filter" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "install_custom_node",
       description:
         "Install an uninstalled custom node pack by cloning its git repository into custom_nodes. The user must confirm. Requires a full git repository URL.",
@@ -450,6 +466,13 @@ function buildUi() {
                 </div>
                 <button class="ccb-btn" id="ccb-unload-now">Unload now</button>
               </div>
+            </div>
+            <div class="ccb-field">
+              <label>Let the assistant read the ComfyUI console</label>
+              <select id="ccb-console-enabled">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
             </div>
             <div class="ccb-field">
               <label>Vision</label>
@@ -1797,6 +1820,8 @@ async function executeTool(name, args) {
       return rememberLesson(args.text, args.tags, args.pinned === true);
     case "search_memory":
       return searchMemory(args.query, args.limit);
+    case "get_console_log":
+      return getConsoleLog(args.lines, args.level);
     case "web_search":
       return webSearch(args.query, args.count);
     case "search_docs":
@@ -2255,7 +2280,7 @@ async function downloadDebugReport() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "comfyui-assistent-debug.txt";
+    link.download = "comfyui-assistant-debug.txt";
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -2353,6 +2378,7 @@ function populateSettings() {
   setValue("#ccb-max-tokens", config.max_tokens ?? 2048);
   setValue("#ccb-native-tools", String(config.use_native_tools !== false));
   setValue("#ccb-unload-on-execute", String(config.unload?.on_execute !== false));
+  setValue("#ccb-console-enabled", String(config.console?.enabled !== false));
   setValue("#ccb-images-output", String(images.always_output === true));
   setValue("#ccb-images-inputs", String(images.always_inputs === true));
   setValue("#ccb-images-mention", String(images.auto_on_mention !== false));
@@ -2425,6 +2451,10 @@ function collectSettings() {
     use_native_tools: get("#ccb-native-tools") === "true",
     unload: {
       on_execute: get("#ccb-unload-on-execute") === "true",
+    },
+    console: {
+      enabled: get("#ccb-console-enabled") === "true",
+      lines: 500,
     },
     system_prompt: get("#ccb-system-prompt"),
     websearch: {
@@ -2912,6 +2942,20 @@ async function searchMemory(query, limit) {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
   return { lessons: (payload.lessons || []).map((lesson) => lesson.text) };
+}
+
+async function getConsoleLog(lines, level) {
+  const response = await api.fetchApi("/chatbot/console", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ lines, level }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  if (payload.available === false) {
+    return { error: payload.reason || "Console access is disabled in settings." };
+  }
+  return { count: payload.total, lines: (payload.lines || []).map((entry) => entry.m) };
 }
 
 async function updateMemory(payload) {

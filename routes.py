@@ -7,7 +7,7 @@ from typing import Any, Mapping
 from aiohttp import web
 from server import PromptServer
 
-from . import debug, installer, kb, memory, providers, websearch
+from . import console, debug, installer, kb, memory, providers, websearch
 from .config_store import CONFIG_STORE
 
 routes = PromptServer.instance.routes
@@ -367,3 +367,18 @@ async def unload_llm(_request: web.Request) -> web.Response:
     except Exception as exc:
         debug.log("provider", "unload_error", level="error", error=str(exc))
         return web.json_response({"error": str(exc)}, status=502)
+
+
+@routes.post("/chatbot/console")
+async def console_log(request: web.Request) -> web.Response:
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        payload = {}
+    config = _effective_config(payload).get("console", {})
+    if config.get("enabled") is False:
+        return web.json_response({"lines": [], "total": 0, "available": False, "reason": "Console access is disabled in settings."})
+    lines = payload.get("lines") or config.get("lines") or 500
+    level = payload.get("level")
+    result = await asyncio.to_thread(console.recent, lines, level)
+    return web.json_response(result)
