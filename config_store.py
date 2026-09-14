@@ -133,6 +133,7 @@ class ConfigStore:
         with self._lock:
             config = deepcopy(self._config)
         config["base_url"] = config.get("base_url") or DEFAULT_BASE_URLS.get(config["provider"], "")
+        config["system_prompt_default"] = DEFAULT_SYSTEM_PROMPT
         if not include_secrets:
             config["api_key_configured"] = bool(self._config.get("api_key"))
             config["api_key"] = ""

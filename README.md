@@ -171,7 +171,7 @@ The assistant calls tools as needed; you'll see each call in the activity log. D
 | Temperature | 0.7 | Sampling temperature. |
 | Max tokens | 2048 | Max completion tokens per reply. |
 | Native tool calling | On | Off = model emits fenced JSON actions (for tool-less models). |
-| System prompt | built-in | Instruction preamble. |
+| System prompt | built-in | Instruction preamble. Use **Reset to default** to restore the built-in prompt. |
 | Vision | auto | Detected per model; shown read-only. |
 | Web search provider / key / results | Tavily / empty / 5 | Tavily, Brave, or SerpAPI. |
 | Knowledge base | On | Index installed pack docs + official docs. |

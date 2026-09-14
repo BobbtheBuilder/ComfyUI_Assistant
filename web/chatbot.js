@@ -545,6 +545,9 @@ function buildUi() {
             <div class="ccb-field">
               <label>System prompt</label>
               <textarea id="ccb-system-prompt" rows="5"></textarea>
+              <div class="ccb-row">
+                <button class="ccb-btn" id="ccb-system-prompt-reset">Reset to default</button>
+              </div>
             </div>
             <div class="ccb-field">
               <label>Web search provider</label>
@@ -669,6 +672,10 @@ function wireUi() {
   root.querySelector("#ccb-base-url").addEventListener("change", () => refreshModels());
   root.querySelector("#ccb-refresh-models").addEventListener("click", () => refreshModels());
   root.querySelector("#ccb-save").addEventListener("click", () => saveSettings());
+  root.querySelector("#ccb-system-prompt-reset").addEventListener("click", () => {
+    state.dom.root.querySelector("#ccb-system-prompt").value = state.config?.system_prompt_default || "";
+    saveSettings();
+  });
   root.querySelector("#ccb-test").addEventListener("click", () => refreshModels(true));
   root.querySelector("#ccb-kb-rebuild").addEventListener("click", () => rebuildKb(false));
   root.querySelector("#ccb-kb-sync").addEventListener("click", () => rebuildKb(true));
