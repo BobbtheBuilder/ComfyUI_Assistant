@@ -490,3 +490,55 @@ async def summarize(config: Mapping[str, Any], text: str) -> str:
         return ""
     message = choices[0].get("message", {})
     return str(message.get("content") or "").strip()
+
+
+async def unload_models(config: Mapping[str, Any]) -> dict[str, Any]:
+    provider = config.get("provider")
+    root = _api_root(config)
+    unloaded: list[str] = []
+    if provider == "lmstudio":
+        url = f"{root}/api/v1/models"
+        async with aiohttp.ClientSession(timeout=_timeout()) as session:
+            async with session.get(url, headers=_headers(config)) as response:
+                if response.status == 404:
+                    return {"unsupported": True, "unloaded": [], "reason": "LM Studio v1 API is not available (needs 0.4.0+)."}
+                if response.status >= 400:
+                    raise RuntimeError(await _read_error(response))
+                payload = await response.json()
+            models = payload.get("models", []) if isinstance(payload, Mapping) else []
+            for model in models:
+                if not isinstance(model, Mapping):
+                    continue
+                for instance in model.get("loaded_instances") or []:
+                    instance_id = str(instance.get("id") or "").strip() if isinstance(instance, Mapping) else ""
+                    if not instance_id:
+                        continue
+                    async with session.post(
+                        f"{root}/api/v1/models/unload",
+                        headers=_headers(config),
+                        json={"instance_id": instance_id},
+                    ) as unload_response:
+                        if unload_response.status < 400:
+                            unloaded.append(instance_id)
+        return {"unsupported": False, "unloaded": unloaded}
+    if provider == "ollama":
+        url = f"{root}/api/ps"
+        async with aiohttp.ClientSession(timeout=_timeout()) as session:
+            async with session.get(url, headers=_headers(config)) as response:
+                if response.status >= 400:
+                    raise RuntimeError(await _read_error(response))
+                payload = await response.json()
+            models = payload.get("models", []) if isinstance(payload, Mapping) else []
+            for model in models:
+                name = str(model.get("name") or model.get("model") or "").strip() if isinstance(model, Mapping) else ""
+                if not name:
+                    continue
+                async with session.post(
+                    f"{root}/api/generate",
+                    headers=_headers(config),
+                    json={"model": name, "keep_alive": 0},
+                ) as unload_response:
+                    if unload_response.status < 400:
+                        unloaded.append(name)
+        return {"unsupported": False, "unloaded": unloaded}
+    return {"unsupported": True, "unloaded": [], "reason": f"Provider '{provider}' has nothing to unload."}

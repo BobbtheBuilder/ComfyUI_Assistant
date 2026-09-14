@@ -349,3 +349,21 @@ async def debug_report(request: web.Request) -> web.Response:
 async def debug_clear(_request: web.Request) -> web.Response:
     await asyncio.to_thread(debug.clear)
     return web.json_response({"ok": True})
+
+
+@routes.post("/chatbot/unload")
+async def unload_llm(_request: web.Request) -> web.Response:
+    config = _effective_config({})
+    try:
+        result = await providers.unload_models(config)
+        debug.log(
+            "provider",
+            "unload",
+            provider=config.get("provider"),
+            unloaded=result.get("unloaded"),
+            unsupported=result.get("unsupported"),
+        )
+        return web.json_response(result)
+    except Exception as exc:
+        debug.log("provider", "unload_error", level="error", error=str(exc))
+        return web.json_response({"error": str(exc)}, status=502)

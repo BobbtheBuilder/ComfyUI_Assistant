@@ -440,6 +440,18 @@ function buildUi() {
               </select>
             </div>
             <div class="ccb-field">
+              <label>Unload the LLM when I run a workflow</label>
+              <div class="ccb-row">
+                <div class="ccb-field">
+                  <select id="ccb-unload-on-execute">
+                    <option value="true">Yes</option>
+                    <option value="false">No</option>
+                  </select>
+                </div>
+                <button class="ccb-btn" id="ccb-unload-now">Unload now</button>
+              </div>
+            </div>
+            <div class="ccb-field">
               <label>Vision</label>
               <div class="ccb-status" id="ccb-vision">Vision support: unknown</div>
             </div>
@@ -701,6 +713,7 @@ function wireUi() {
   root.querySelector("#ccb-debug-copy").addEventListener("click", () => copyDebugReport());
   root.querySelector("#ccb-debug-download").addEventListener("click", () => downloadDebugReport());
   root.querySelector("#ccb-debug-clear").addEventListener("click", () => clearDebugLog());
+  root.querySelector("#ccb-unload-now").addEventListener("click", () => unloadLlm(false));
   root.querySelector("#ccb-model").addEventListener("change", () => {
     detectVision();
     detectContextWindow();
@@ -2339,6 +2352,7 @@ function populateSettings() {
   setValue("#ccb-temperature", config.temperature ?? 0.7);
   setValue("#ccb-max-tokens", config.max_tokens ?? 2048);
   setValue("#ccb-native-tools", String(config.use_native_tools !== false));
+  setValue("#ccb-unload-on-execute", String(config.unload?.on_execute !== false));
   setValue("#ccb-images-output", String(images.always_output === true));
   setValue("#ccb-images-inputs", String(images.always_inputs === true));
   setValue("#ccb-images-mention", String(images.auto_on_mention !== false));
@@ -2409,6 +2423,9 @@ function collectSettings() {
     temperature: Number(get("#ccb-temperature")) || 0,
     max_tokens: Number(get("#ccb-max-tokens")) || 2048,
     use_native_tools: get("#ccb-native-tools") === "true",
+    unload: {
+      on_execute: get("#ccb-unload-on-execute") === "true",
+    },
     system_prompt: get("#ccb-system-prompt"),
     websearch: {
       provider: get("#ccb-websearch-provider"),
@@ -2956,6 +2973,29 @@ function lessonsContext() {
   return `Lessons learned from past corrections and preferences (follow these):\n${lines.join("\n")}`;
 }
 
+async function unloadLlm(quiet = false) {
+  try {
+    const response = await api.fetchApi("/chatbot/unload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    if (payload.unsupported) {
+      if (!quiet) appendNotice(payload.reason || "This provider has nothing to unload.");
+      return payload;
+    }
+    const count = (payload.unloaded || []).length;
+    if (!quiet) appendNotice(count ? `Unloaded ${count} model instance(s).` : "No loaded models to unload.");
+    else if (count) appendNotice(`Unloaded ${count} model instance(s) for the workflow.`);
+    return payload;
+  } catch (error) {
+    if (!quiet) appendNotice(`Unload failed: ${error.message}`);
+    return { error: error.message };
+  }
+}
+
 app.registerExtension({
   name: "ComfyUI.Assistant",
   async setup() {
@@ -2981,6 +3021,9 @@ app.registerExtension({
       if (state.lastOutputs.length > 20) {
         state.lastOutputs = state.lastOutputs.slice(-20);
       }
+    });
+    api.addEventListener("execution_start", () => {
+      if (state.config?.unload?.on_execute !== false) unloadLlm(true);
     });
     state.sessionKey = resolveWorkflowKey() || "__default__";
     startSessionWatcher();

@@ -92,6 +92,9 @@ across sessions.
 ### Providers
 - LM Studio, Ollama, any OpenAI-compatible endpoint, and Anthropic.
 - Native tool calling, with an inline-JSON action fallback for models that don't support tools.
+- **Unload the LLM when I run a workflow** (Settings, on by default): when a workflow starts, local
+  model instances are unloaded to free VRAM (LM Studio via `/api/v1/models/unload`, Ollama via
+  `keep_alive: 0`). A **Unload now** button is next to the setting. Only affects local providers.
 
 ## Requirements
 
@@ -175,6 +178,7 @@ The assistant calls tools as needed; you'll see each call in the activity log. D
 | Temperature | 0.7 | Sampling temperature. |
 | Max tokens | 2048 | Max completion tokens per reply. |
 | Native tool calling | On | Off = model emits fenced JSON actions (for tool-less models). |
+| Unload the LLM when I run a workflow | On | Unload local model instances when a workflow starts (LM Studio / Ollama). |
 | System prompt | built-in | Instruction preamble. Use **Reset to default** to restore the built-in prompt. |
 | Vision | auto | Detected per model; shown read-only. |
 | Web search provider / key / results | Tavily / empty / 5 | Tavily, Brave, or SerpAPI. |

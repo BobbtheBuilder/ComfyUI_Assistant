@@ -89,6 +89,9 @@ DEFAULTS: dict[str, Any] = {
         "auto_detect": True,
         "inject_limit": 8,
     },
+    "unload": {
+        "on_execute": True,
+    },
     "debug": {
         "enabled": False,
     },
