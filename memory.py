@@ -7,6 +7,11 @@ import threading
 import time
 from typing import Any
 
+try:
+    from .storage import connect, fts_query
+except ImportError:
+    from storage import connect, fts_query
+
 NODE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(NODE_DIR, "assistant_memory.sqlite")
 
@@ -14,10 +19,7 @@ _lock = threading.RLock()
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+    return connect(DB_PATH)
 
 
 def _init(conn: sqlite3.Connection) -> None:
@@ -31,8 +33,7 @@ def _init(conn: sqlite3.Connection) -> None:
             created_at REAL,
             updated_at REAL,
             enabled INTEGER DEFAULT 1,
-            pinned INTEGER DEFAULT 0,
-            uses INTEGER DEFAULT 0
+            pinned INTEGER DEFAULT 0
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS lessons_fts USING fts5(
             text, tags, content='lessons', content_rowid='id', tokenize='porter unicode61'
@@ -65,11 +66,10 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         "updated_at": row[5],
         "enabled": bool(row[6]),
         "pinned": bool(row[7]),
-        "uses": row[8] or 0,
     }
 
 
-_COLUMNS = "id, text, tags, source, created_at, updated_at, enabled, pinned, uses"
+_COLUMNS = "id, text, tags, source, created_at, updated_at, enabled, pinned"
 
 
 def list_lessons(enabled_only: bool = False) -> list[dict[str, Any]]:
@@ -107,8 +107,8 @@ def add_lesson(text: str, tags: str = "", source: str = "user", pinned: bool = F
                     conn.commit()
                     return {"id": existing["id"], "updated": True}
             cursor = conn.execute(
-                "INSERT INTO lessons (text, tags, source, created_at, updated_at, enabled, pinned, uses) "
-                "VALUES (?, ?, ?, ?, ?, 1, ?, 0)",
+                "INSERT INTO lessons (text, tags, source, created_at, updated_at, enabled, pinned) "
+                "VALUES (?, ?, ?, ?, ?, 1, ?)",
                 (text, tags, source, now, now, 1 if pinned else 0),
             )
             conn.commit()
@@ -177,15 +177,8 @@ def clear_lessons() -> None:
             conn.close()
 
 
-def _fts_query(query: str) -> str:
-    tokens = [token for token in re.findall(r"[A-Za-z0-9_]+", query or "") if len(token) >= 3]
-    if not tokens:
-        return ""
-    return " OR ".join(f'"{token}"' for token in tokens[:16])
-
-
 def search(query: str, limit: int = 8) -> list[dict[str, Any]]:
-    match = _fts_query(query)
+    match = fts_query(query, min_length=3, limit=16)
     if not match:
         return []
     with _lock:
@@ -199,19 +192,6 @@ def search(query: str, limit: int = 8) -> list[dict[str, Any]]:
                 (match, max(1, min(int(limit), 30))),
             ).fetchall()
             return [_row_to_dict(row) for row in rows]
-        finally:
-            conn.close()
-
-
-def mark_used(lesson_ids: list[int]) -> None:
-    if not lesson_ids:
-        return
-    with _lock:
-        conn = _connect()
-        try:
-            _init(conn)
-            conn.executemany("UPDATE lessons SET uses = uses + 1 WHERE id = ?", [(int(i),) for i in lesson_ids])
-            conn.commit()
         finally:
             conn.close()
 

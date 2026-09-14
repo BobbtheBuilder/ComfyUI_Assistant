@@ -8,21 +8,15 @@ from typing import Any, AsyncIterator, Mapping
 
 import aiohttp
 
+try:
+    from .debug import debug_log as _debug_log
+except ImportError:
+    from debug import debug_log as _debug_log
+
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_TIMEOUT = 300.0
 
 DATA_URL_RE = re.compile(r"^data:(?P<media>[^;,]+);base64,(?P<data>.*)$", re.S)
-
-
-def _debug_log(*args: Any, **kwargs: Any) -> None:
-    try:
-        try:
-            from . import debug
-        except ImportError:
-            import debug
-        debug.log(*args, **kwargs)
-    except Exception:
-        pass
 
 
 def _base_url(config: Mapping[str, Any]) -> str:

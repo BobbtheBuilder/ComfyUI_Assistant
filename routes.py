@@ -269,7 +269,10 @@ async def docs_node(request: web.Request) -> web.Response:
 @routes.get("/chatbot/memory")
 async def memory_list(_request: web.Request) -> web.Response:
     lessons = await asyncio.to_thread(memory.list_lessons)
-    return web.json_response({"lessons": lessons})@routes.post("/chatbot/memory")
+    return web.json_response({"lessons": lessons})
+
+
+@routes.post("/chatbot/memory")
 async def memory_update(request: web.Request) -> web.Response:
     try:
         payload = await request.json()

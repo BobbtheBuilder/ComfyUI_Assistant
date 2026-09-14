@@ -107,6 +107,13 @@ def log(category: str, event: str, level: str = "info", **data: Any) -> None:
     _write_file(json.dumps(record, ensure_ascii=True))
 
 
+def debug_log(*args: Any, **kwargs: Any) -> None:
+    try:
+        log(*args, **kwargs)
+    except Exception:
+        pass
+
+
 def clear() -> None:
     with _lock:
         _events.clear()
@@ -188,6 +195,8 @@ def _config_summary() -> dict[str, Any]:
             "context": config.get("context", {}),
             "memory": config.get("memory", {}),
             "debug": config.get("debug", {}),
+            "console": config.get("console", {}),
+            "unload": config.get("unload", {}),
         },
     }
 

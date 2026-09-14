@@ -1401,7 +1401,10 @@ async function validateWorkflow() {
   };
   debugLog("graph", "validate", { ok: report.ok, ...report.counts });
   return report;
-}function validationMessage(report) {
+}
+
+
+function validationMessage(report) {
   const parts = [];
   if (report.unconnected_required.length) {
     parts.push("Unconnected required inputs:");

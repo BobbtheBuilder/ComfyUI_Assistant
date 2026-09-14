@@ -9,6 +9,16 @@ import urllib.request
 from datetime import datetime
 from typing import Any
 
+try:
+    from .debug import debug_log as _debug_log
+except ImportError:
+    from debug import debug_log as _debug_log
+
+try:
+    from .storage import connect, fts_query
+except ImportError:
+    from storage import connect, fts_query
+
 NODE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(NODE_DIR, "kb_index.sqlite")
 CACHE_DIR = os.path.join(NODE_DIR, "kb_cache")
@@ -65,11 +75,7 @@ def _custom_node_dirs() -> list[str]:
 
 
 def _connect() -> sqlite3.Connection:
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+    return connect(DB_PATH)
 
 
 def _init(conn: sqlite3.Connection) -> None:
@@ -364,17 +370,6 @@ def _refresh_counts() -> None:
         conn.close()
 
 
-def _debug_log(*args: Any, **kwargs: Any) -> None:
-    try:
-        try:
-            from . import debug
-        except ImportError:
-            import debug
-        debug.log(*args, **kwargs)
-    except Exception:
-        pass
-
-
 def build(force_official: bool = False, auto_official: bool = True, refresh_days: int = 7, delay: float = 0) -> None:
     if delay:
         time.sleep(delay)
@@ -455,13 +450,6 @@ def status() -> dict[str, Any]:
         return dict(_state)
 
 
-def _fts_query(query: str) -> str:
-    tokens = [token for token in re.findall(r"[A-Za-z0-9_]+", query) if len(token) >= 2]
-    if not tokens:
-        return ""
-    return " OR ".join(f'"{token}"' for token in tokens[:12])
-
-
 def _snippet(content: str, query: str, length: int = 500) -> str:
     if len(content) <= length:
         return content
@@ -491,7 +479,7 @@ def _row_to_result(row: Any, query: str) -> dict[str, Any]:
 
 
 def _search_conn(conn: sqlite3.Connection, query: str, limit: int, source: str | None) -> list[dict[str, Any]]:
-    match = _fts_query(query)
+    match = fts_query(query, min_length=2, limit=12)
     if not match:
         return []
     sql = (
