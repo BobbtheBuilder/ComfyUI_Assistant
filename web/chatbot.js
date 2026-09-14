@@ -1395,22 +1395,94 @@ function imageUrl({ filename, subfolder, type }) {
   return api.apiURL(`/view?${params.toString()}`);
 }
 
+const IMAGE_EXT_RE = /\.(png|jpe?g|webp|bmp|gif|tiff?|avif)(\s*\[(input|output|temp)\])?$/i;
+const MAX_INPUT_IMAGES = 12;
+
+function looksLikeImageValue(value) {
+  if (typeof value !== "string") return false;
+  const raw = value.trim();
+  if (!raw || raw.length > 600) return false;
+  if (/filename=[^&]*\.(png|jpe?g|webp|bmp|gif|tiff?|avif)\b/i.test(raw)) return true;
+  return IMAGE_EXT_RE.test(raw);
+}
+
+function imageValueToUrl(value) {
+  const raw = String(value).trim();
+  if (/^(data:|blob:|https?:\/\/)/i.test(raw)) return raw;
+  if (raw.startsWith("/")) return raw;
+  const match = raw.match(/^(.*?)\s*\[(input|output|temp)\]$/i);
+  const path = match ? match[1] : raw;
+  if (!IMAGE_EXT_RE.test(path)) return null;
+  const type = match ? match[2].toLowerCase() : "input";
+  const slash = path.lastIndexOf("/");
+  const subfolder = slash >= 0 ? path.slice(0, slash) : "";
+  const filename = slash >= 0 ? path.slice(slash + 1) : path;
+  return imageUrl({ filename, subfolder, type });
+}
+
+function imageRefToUrl(ref) {
+  if (!ref || typeof ref !== "object") return null;
+  const filename = String(ref.filename || ref.name || ref.file || "");
+  if (!filename || !IMAGE_EXT_RE.test(filename)) return null;
+  return imageUrl({
+    filename,
+    subfolder: String(ref.subfolder || ref.folder || ref.dir || ""),
+    type: String(ref.type || "input"),
+  });
+}
+
+function collectNodeImages(node) {
+  const found = [];
+  const title = node.title || node.type;
+  const push = (url, label) => {
+    if (typeof url === "string" && url) found.push({ name: label, url });
+  };
+  for (const image of node.imgs || []) {
+    if (image?.src) push(image.src, `${title}: preview`);
+  }
+  const visit = (value, label) => {
+    if (typeof value === "string") {
+      if (looksLikeImageValue(value)) push(imageValueToUrl(value), `${title}: ${label}`);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (typeof item === "string") {
+          if (looksLikeImageValue(item)) push(imageValueToUrl(item), `${title}: ${label}`);
+        } else {
+          push(imageRefToUrl(item), `${title}: ${label}`);
+        }
+      }
+      return;
+    }
+    push(imageRefToUrl(value), `${title}: ${label}`);
+  };
+  for (const widget of node.widgets || []) {
+    if (widget.element) continue;
+    visit(widget.value, widget.name || "widget");
+  }
+  for (const [key, value] of Object.entries(node.properties || {})) {
+    visit(value, key);
+  }
+  return found;
+}
+
 function collectInputImages() {
   const results = [];
+  const seen = new Set();
   for (const node of app.graph._nodes || []) {
-    const widget = (node.widgets || []).find((w) => w.name === "image" || w.name === "image_path");
-    if (!widget || typeof widget.value !== "string" || !widget.value) continue;
-    let url = node.imgs?.[0]?.src;
-    if (!url) {
-      const match = widget.value.match(/^(.*?)\s*\[(input|output|temp)\]$/);
-      const path = match ? match[1] : widget.value;
-      const type = match ? match[2] : "input";
-      const slash = path.lastIndexOf("/");
-      const subfolder = slash >= 0 ? path.slice(0, slash) : "";
-      const filename = slash >= 0 ? path.slice(slash + 1) : path;
-      url = imageUrl({ filename, subfolder, type });
+    let entries = [];
+    try {
+      entries = collectNodeImages(node);
+    } catch {
+      continue;
     }
-    results.push({ name: `${node.title || node.type}: ${widget.value}`, url });
+    for (const entry of entries) {
+      if (!entry.url || seen.has(entry.url)) continue;
+      seen.add(entry.url);
+      results.push(entry);
+      if (results.length >= MAX_INPUT_IMAGES) return results;
+    }
   }
   return results;
 }
