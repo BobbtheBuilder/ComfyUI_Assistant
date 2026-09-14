@@ -29,6 +29,7 @@ across sessions.
 - [Debugging and reporting issues](#debugging-and-reporting-issues)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
+- [Changelog](#changelog)
 
 ## Features
 
@@ -257,3 +258,22 @@ If you use this code, please keep the copyright and license notice.
 
 Bug reports, provider test results, and feature ideas are welcome:
 https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
+
+## Changelog
+
+### 0.2.0
+
+- Added an optional read-only **ComfyUI console** tool (`get_console_log`): the assistant can read
+  recent server console lines, or only errors/warnings, to diagnose failed runs. It reads the
+  console only when asked and results are scrubbed like the debug report. Enabled by default
+  (Settings → **Let the assistant read the ComfyUI console**).
+- Added **Unload the LLM when I run a workflow** so local models (LM Studio / Ollama) release VRAM
+  before a run starts, plus an **Unload now** button.
+- Fixed a broken route registration that stopped the **Memory** panel from loading or saving lessons.
+- Added the `console` and `unload` settings to the debug report.
+- Internal cleanup: removed dead code and consolidated duplicated helpers.
+
+### 0.1.0
+
+- Initial release: floating chat panel, workflow read/edit tools, knowledge base, memory, vision,
+  web search, custom node install, context compaction, and a privacy-first debug system.
