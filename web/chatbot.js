@@ -1397,6 +1397,9 @@ function imageUrl({ filename, subfolder, type }) {
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|webp|bmp|gif|tiff?|avif)(\s*\[(input|output|temp)\])?$/i;
 const MAX_INPUT_IMAGES = 12;
+const CAROUSEL_NODE_TYPES = new Set(["MiniMaxH3ProjectAssetManager"]);
+const MAX_CAROUSEL_IMAGES = 6;
+const CAROUSEL_MEDIA_ROUTE = "/minimax_h3_context_loop/project-assets/media";
 
 function looksLikeImageValue(value) {
   if (typeof value !== "string") return false;
@@ -1431,12 +1434,53 @@ function imageRefToUrl(ref) {
   });
 }
 
+function collectProjectAssetImages(node) {
+  const found = [];
+  const widgetValue = (name) => {
+    const widget = (node.widgets || []).find((item) => item.name === name);
+    return typeof widget?.value === "string" ? widget.value.trim() : "";
+  };
+  const project = widgetValue("run_name");
+  if (!project) return found;
+  let catalog = null;
+  const rawCatalog = widgetValue("catalog_json");
+  if (rawCatalog) {
+    try {
+      catalog = JSON.parse(rawCatalog);
+    } catch {
+      catalog = null;
+    }
+  }
+  const assets = Array.isArray(catalog?.assets) ? catalog.assets : [];
+  const title = node.title || node.type;
+  for (const asset of assets) {
+    if (!asset || typeof asset !== "object") continue;
+    if (!String(asset.kind || "").toLowerCase().startsWith("image")) continue;
+    const id = String(asset.id || "").trim();
+    if (!id) continue;
+    const params = new URLSearchParams({ project, asset: id, variant: "poster" });
+    found.push({
+      name: `${title}: ${String(asset.tag || asset.name || asset.original_name || id)}`,
+      url: api.apiURL(`${CAROUSEL_MEDIA_ROUTE}?${params.toString()}`),
+    });
+    if (found.length >= MAX_CAROUSEL_IMAGES) break;
+  }
+  return found;
+}
+
 function collectNodeImages(node) {
   const found = [];
   const title = node.title || node.type;
   const push = (url, label) => {
     if (typeof url === "string" && url) found.push({ name: label, url });
   };
+  if (CAROUSEL_NODE_TYPES.has(node.comfyClass || node.type)) {
+    try {
+      found.push(...collectProjectAssetImages(node));
+    } catch {
+      /* ignore a malformed catalog */
+    }
+  }
   for (const image of node.imgs || []) {
     if (image?.src) push(image.src, `${title}: preview`);
   }

@@ -57,6 +57,8 @@ across sessions.
 - Sees input images and generated outputs. Input discovery is generic: any node that exposes an
   image through an `image`/`image_path` widget, a preview (`node.imgs`), a `filename`/`subfolder`
   reference, or a string referencing a `.png/.jpg/.webp/...` file is picked up.
+- Also reads the **MiniMax H3 Project Asset Carousel** (`MiniMaxH3ProjectAssetManager`): its
+  image assets are attached from the node's catalog via the pack's media route.
 - Auto-attaches the relevant image when you mention images; attach manually via the paperclip
   (*Input image(s)*, *Last output*, *Choose file…*).
 - Can write a prompt from an image, or critique/refine a prompt against the output.
