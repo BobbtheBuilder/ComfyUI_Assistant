@@ -127,6 +127,8 @@ def update_lesson(
     fields: list[str] = []
     values: list[Any] = []
     if text is not None:
+        if not text.strip():
+            raise ValueError("Lesson text is required.")
         fields.append("text = ?")
         values.append(text.strip())
     if tags is not None:

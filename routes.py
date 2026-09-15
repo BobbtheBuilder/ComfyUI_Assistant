@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import Any, Mapping
 
 from aiohttp import web
@@ -11,6 +12,16 @@ from . import console, debug, installer, kb, memory, providers, websearch
 from .config_store import CONFIG_STORE
 
 routes = PromptServer.instance.routes
+
+
+async def _json_object(request: web.Request) -> dict[str, Any]:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "JSON body must be an object."}),
+            content_type="application/json",
+        )
+    return payload
 
 
 def _effective_config(payload: Any) -> dict[str, Any]:
@@ -36,7 +47,7 @@ async def get_config(_request: web.Request) -> web.Response:
 @routes.post("/chatbot/config")
 async def set_config(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
         return web.json_response({"config": CONFIG_STORE.update(payload)})
     except (json.JSONDecodeError, ValueError) as exc:
         return web.json_response({"error": str(exc)}, status=400)
@@ -51,18 +62,21 @@ async def get_history(request: web.Request) -> web.Response:
 @routes.post("/chatbot/history")
 async def set_history(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     key = str(payload.get("key") or "__default__")
-    CONFIG_STORE.set_history(key, payload.get("messages", []))
+    messages = payload.get("messages", [])
+    if not isinstance(messages, list):
+        return web.json_response({"error": "Messages must be a JSON array."}, status=400)
+    CONFIG_STORE.set_history(key, messages)
     return web.json_response({"ok": True})
 
 
 @routes.post("/chatbot/models")
 async def list_models(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         payload = {}
     try:
@@ -72,10 +86,23 @@ async def list_models(request: web.Request) -> web.Response:
         return web.json_response({"error": str(exc)}, status=502)
 
 
+@routes.post("/chatbot/embed_models")
+async def embed_models(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        payload = {}
+    try:
+        models = await providers.embedding_models(_effective_config(payload))
+        return web.json_response({"models": models})
+    except Exception as exc:
+        return web.json_response({"models": [], "error": str(exc)})
+
+
 @routes.post("/chatbot/vision")
 async def vision_support(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         payload = {}
     config = _effective_config(payload)
@@ -90,7 +117,7 @@ async def vision_support(request: web.Request) -> web.Response:
 @routes.post("/chatbot/context")
 async def context_window(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         payload = {}
     config = _effective_config(payload)
@@ -105,7 +132,7 @@ async def context_window(request: web.Request) -> web.Response:
 @routes.post("/chatbot/summarize")
 async def summarize(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     text = str(payload.get("text") or "")
@@ -121,11 +148,15 @@ async def summarize(request: web.Request) -> web.Response:
 @routes.post("/chatbot/chat")
 async def chat(request: web.Request) -> web.StreamResponse:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     messages = payload.get("messages", [])
     tools = payload.get("tools", [])
+    if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
+        return web.json_response({"error": "Messages must be an array of objects."}, status=400)
+    if not isinstance(tools, list) or not all(isinstance(item, dict) for item in tools):
+        return web.json_response({"error": "Tools must be an array of objects."}, status=400)
     config = _effective_config(payload)
     debug.log(
         "route",
@@ -165,7 +196,7 @@ async def chat(request: web.Request) -> web.StreamResponse:
 @routes.post("/chatbot/websearch")
 async def web_search(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     query = str(payload.get("query") or "").strip()
@@ -181,7 +212,7 @@ async def web_search(request: web.Request) -> web.Response:
 @routes.post("/chatbot/install_git")
 async def install_git(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     url = str(payload.get("url") or "").strip()
@@ -206,10 +237,19 @@ async def kb_status(_request: web.Request) -> web.Response:
     return web.json_response({"status": kb.status()})
 
 
+@routes.post("/chatbot/kb/compact")
+async def kb_compact(_request: web.Request) -> web.Response:
+    try:
+        result = await asyncio.to_thread(kb.compact, True)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response({"result": result, "status": kb.status()})
+
+
 @routes.post("/chatbot/kb/rebuild")
 async def kb_rebuild(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         payload = {}
     config = _effective_config(payload).get("kb", {})
@@ -222,7 +262,7 @@ async def kb_rebuild(request: web.Request) -> web.Response:
 @routes.post("/chatbot/kb/sync_official")
 async def kb_sync_official(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         payload = {}
     config = _effective_config(payload).get("kb", {})
@@ -234,14 +274,14 @@ async def kb_sync_official(request: web.Request) -> web.Response:
 @routes.post("/chatbot/docs/search")
 async def docs_search(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     query = str(payload.get("query") or "").strip()
     if not query:
         return web.json_response({"error": "Missing query."}, status=400)
     source = payload.get("source") or None
-    if source not in (None, "pack", "official", "node"):
+    if source not in (None, "pack", "official", "node", "example", "registry", "model"):
         source = None
     try:
         results = await asyncio.to_thread(kb.search, query, int(payload.get("limit") or 6), source)
@@ -253,7 +293,7 @@ async def docs_search(request: web.Request) -> web.Response:
 @routes.post("/chatbot/docs/node")
 async def docs_node(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     node_type = str(payload.get("type") or "").strip()
@@ -275,7 +315,7 @@ async def memory_list(_request: web.Request) -> web.Response:
 @routes.post("/chatbot/memory")
 async def memory_update(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     action = str(payload.get("action") or "add")
@@ -315,7 +355,7 @@ async def memory_update(request: web.Request) -> web.Response:
 @routes.post("/chatbot/memory/search")
 async def memory_search(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     lessons = await asyncio.to_thread(
@@ -327,7 +367,7 @@ async def memory_search(request: web.Request) -> web.Response:
 @routes.post("/chatbot/memory/relevant")
 async def memory_relevant(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     lessons = await asyncio.to_thread(
@@ -339,7 +379,7 @@ async def memory_relevant(request: web.Request) -> web.Response:
 @routes.post("/chatbot/debug/report")
 async def debug_report(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         payload = {}
     client = payload.get("client") if isinstance(payload.get("client"), dict) else None
@@ -375,7 +415,7 @@ async def unload_llm(_request: web.Request) -> web.Response:
 @routes.post("/chatbot/console")
 async def console_log(request: web.Request) -> web.Response:
     try:
-        payload = await request.json()
+        payload = await _json_object(request)
     except json.JSONDecodeError:
         payload = {}
     config = _effective_config(payload).get("console", {})
@@ -385,3 +425,17 @@ async def console_log(request: web.Request) -> web.Response:
     level = payload.get("level")
     result = await asyncio.to_thread(console.recent, lines, level)
     return web.json_response(result)
+
+
+@routes.get("/chatbot/test_workflow")
+async def test_workflow(_request: web.Request) -> web.Response:
+    image_path = ""
+    image_installed = False
+    try:
+        import folder_paths
+
+        image_path = os.path.join(folder_paths.get_input_directory(), "vision_red.png")
+        image_installed = os.path.isfile(image_path)
+    except Exception:
+        pass
+    return web.json_response({"image": "vision_red.png", "image_installed": image_installed, "image_path": image_path})

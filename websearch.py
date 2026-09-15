@@ -4,17 +4,16 @@ from typing import Any, Mapping
 
 import aiohttp
 
-TIMEOUT = 30.0
+try:
+    from .providers import _timeout
+except ImportError:
+    from providers import _timeout
 
 DEFAULT_ENDPOINTS = {
     "tavily": "https://api.tavily.com/search",
     "brave": "https://api.search.brave.com/res/v1/web/search",
     "serpapi": "https://serpapi.com/search.json",
 }
-
-
-def _timeout() -> aiohttp.ClientTimeout:
-    return aiohttp.ClientTimeout(total=TIMEOUT)
 
 
 async def _read_error(response: aiohttp.ClientResponse) -> str:
@@ -79,5 +78,5 @@ async def search(config: Mapping[str, Any], query: str, count: int | None = None
         raise RuntimeError("No web search API key configured. Open settings and add one.")
     limit = int(count or websearch.get("max_results") or 5)
     limit = max(1, min(limit, 20))
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(timeout=_timeout()) as session:
         return await engine(session, key, query, limit)

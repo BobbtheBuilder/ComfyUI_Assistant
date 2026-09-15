@@ -28,6 +28,7 @@ across sessions.
 - [Files and data](#files-and-data)
 - [Debugging and reporting issues](#debugging-and-reporting-issues)
 - [Troubleshooting](#troubleshooting)
+- [Testing](#testing)
 - [License](#license)
 - [Changelog](#changelog)
 
@@ -44,6 +45,8 @@ across sessions.
 ### Workflow editing
 - Reads the active workflow (nodes, titles, links, groups) and the nodes installed in ComfyUI.
 - Add / remove nodes, connect / disconnect links, set widget values, and reposition nodes.
+- Multi-step changes are applied in one batched call (`apply_workflow_edits`), so an edit lands as a
+  single undo step instead of a long chain of round-trips.
 - Writes prompts into the correct positive/negative text encoder (`set_prompt`).
 - Edits are change-tracked, so they are undoable (`Ctrl+Z`) and mark the workflow modified.
 
@@ -66,11 +69,18 @@ across sessions.
 - Images are downscaled (default max 1024 px, JPEG q0.85) before sending. Requires a vision model.
 
 ### Knowledge base
-- Local SQLite FTS5 index of every installed custom-node pack's markdown **plus the official
-  ComfyUI documentation** (fetched once from `docs.comfy.org/llms-full.txt`).
+- Local SQLite index of installed pack docs, the official ComfyUI docs
+  (`docs.comfy.org/llms-full.txt`), the GitHub wiki + README, every installed node's **full schema**
+  (inputs, types, defaults, enums, tooltips, outputs), bundled **example workflows**, and the
+  custom-node/manager **registry** (pack descriptions, node→pack map, model list).
+- **Hybrid search**: SQLite FTS5 keyword search fused with **embedding** semantic search (LM Studio /
+  Ollama / any OpenAI-compatible `/embeddings`; keyword-only when the provider has no embeddings).
 - Exposed to the model via `search_docs` / `get_node_docs`.
 - Built in the background on first start, updated incrementally afterwards, and re-indexed after a
-  git install. Rebuild/sync manually from Settings.
+  git install. Rebuild/sync/settings in **Settings → Knowledge base**.
+- The index is **compacted automatically** at the end of a rebuild, and the **Compact** button
+  reclaims free space on demand (SQLite `VACUUM`; enables incremental auto-vacuum afterwards).
+- **The knowledge base is still a work in progress and will keep improving in future versions.**
 
 ### Memory
 - Remembers corrections and preferences across sessions (`remember_lesson`).
@@ -168,6 +178,10 @@ Ask in plain language, for example:
 The assistant calls tools as needed; you'll see each call in the activity log. Destructive actions
 (remove node, install a pack) ask for confirmation.
 
+While the assistant is working you can **steer it**: type a correction and press Enter. The message is
+queued and applied on its next step, so it can change course without you cancelling the run. Steering
+messages show with a `↪` marker. To stop entirely, use **Cancel**.
+
 ## Settings reference
 
 | Setting | Default | Description |
@@ -185,6 +199,8 @@ The assistant calls tools as needed; you'll see each call in the activity log. D
 | Vision | auto | Detected per model; shown read-only. |
 | Web search provider / key / results | Tavily / empty / 5 | Tavily, Brave, or SerpAPI. |
 | Knowledge base | On | Index installed pack docs + official docs. |
+| Index example workflows / registry / extended docs | On | Add bundled example workflows, the pack registry, and the wiki/README. |
+| Embedding search / embedding model | On / auto | Semantic search via the provider's `/embeddings`; model auto-detected. |
 | Official docs auto-update / refresh days | On / 7 | Re-fetch official docs when stale. |
 | Always include last output / input images | Off | Auto-attach images to every message. |
 | Auto-attach images when mentioned | On | Attach the relevant image if you refer to one. |
@@ -207,7 +223,7 @@ All of these live in `custom_nodes/ComfyUI_Assistant/` and are gitignored:
 | --- | --- |
 | `chatbot_config.json` | Settings, including API keys. Never committed. |
 | `chatbot_history.json` | Per-workflow chat history (no image data). |
-| `kb_index.sqlite` | Knowledge base index (~50 MB). |
+| `kb_index.sqlite` | Knowledge base index (compacted automatically; the **Compact** button reclaims space). |
 | `kb_cache/` | Cached official docs (~9 MB). |
 | `assistant_memory.sqlite` | Saved lessons. |
 | `debug.log` | Debug log (only when Debug is enabled). |
@@ -248,6 +264,44 @@ stored or exported. (Use **Clear log** to wipe it.)
 - **Custom node install fails** — ensure `git` is on PATH and ComfyUI's Python can reach PyPI; the
   install output is shown in the chat.
 
+## Testing
+
+The assistant ships a **workflow-task test suite** that measures whether a model can actually operate
+ComfyUI from scratch: it **builds a workflow from your description** using only the installed nodes +
+the knowledge base (no hints), then modifies it with a fixed set of increasingly hard tasks, then
+diagnoses a workflow you deliberately break. It runs against whichever provider is selected in
+**Settings**.
+
+**How to run (in the panel):**
+
+1. Click **Settings → Test workflow tasks**.
+2. Type **`start`**. The suite saves your current workflow, clears the canvas, and asks what to build.
+3. Type the workflow you want, e.g. *"a Qwen image-edit workflow"* or *"a Krea2 Turbo workflow"*.
+4. It runs the tasks **one at a time**:
+   - **Build** a workflow from your description.
+   - **Set a value** — set the sampler's steps.
+   - **Add and wire an image-scale node** before the SaveImage.
+   - **Math-driven resolution (hard)** — read the input image's size, compute 2× rounded to a multiple
+     of 8 with a math node, and resize the input to it.
+   - **Arrange** the workflow.
+   - **Prompt from the test image** — write a describing prompt into the prompt input (adds a
+     `LoadImage` if needed).
+   - **Diagnose** — *you* delete one or more nodes, click Continue, and the assistant must fix it.
+5. After each task a **card asks Yes / No** right in the chat — the canvas stays visible so you can
+   inspect the result. While a task runs you'll see live progress (the streamed reply, each tool call,
+   and a status line) and the **Send** button becomes **Cancel**.
+
+Type `cancel` (or click Cancel) to abort. Your workflow is restored afterwards. The image task needs
+the test image in ComfyUI's `input/` folder — run `python tests/install_fixtures.py` once.
+
+**Automated (offline) tests** — standard-library `unittest`, no extra dependencies:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+These cover provider stream parsing, the shared storage/memory/KB helpers, and the KB indexer helpers.
+
 ## License
 
 MIT © 2026 Walter Gossard — see [LICENSE](LICENSE).
@@ -260,6 +314,61 @@ Bug reports, provider test results, and feature ideas are welcome:
 https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 ## Changelog
+
+### 0.4.2
+
+- The knowledge base is still a work in progress and will keep improving in future versions.
+- Knowledge base storage hygiene: the index is **compacted** (`VACUUM`) at the end of a rebuild and via
+  a new **Settings → Knowledge base → Compact** button, and the DB is switched to incremental
+  auto-vacuum. A first run reclaimed ~520 MB (871 MB → 352 MB) without touching the content.
+- Test-suite prompts (build target, the manual-delete Continue, and Yes/No verdicts) now appear as
+  **cards in the chat** instead of blocking pop-ups, so the canvas stays visible while you judge. The
+  test run also shows **live progress** (streamed reply, tool calls, a status line) and the **Send**
+  button turns into **Cancel** while it runs. The general destructive-action confirmation (remove
+  node, install pack) uses the same in-chat cards now.
+- Fixed chat sessions leaking across workflows: each workflow now gets its own key (saved workflows by
+  path, untitled ones by a unique id), so opening a new workflow shows an empty chat instead of the
+  previous workflow's conversation.
+- Knowledge base: changing the embedding model now re-embeds (stored vectors are wiped) and vector
+  search is guarded against dimension mismatches, so `search_docs` can't break after a model change.
+  The resolved embedding model is cached instead of re-detected on every search.
+- Removed a duplicated HTTP-timeout helper (web search now reuses the provider one) and a stale
+  fixture reference in `tests/install_fixtures.py`.
+
+### 0.4.0
+
+- Safety guards when writing into node widgets: the assistant now **refuses invalid JSON** (if a value
+  looks like a JSON object and doesn't parse), rejects `file:///` URLs, and caps value size, so it
+  can't corrupt a JSON-widget node. The agent loop is also capped (25 steps) so a stuck model can't
+  spin forever.
+- Fixed the panel "refreshing"/cancelling while you type: removed the 1.5 s workflow poll (now uses
+  ComfyUI's `graphChanged` event, debounced so transient changes don't reset the chat), and the
+  panel now steps aside (fades, ignores clicks) while a ComfyUI dialog is focused. Enter/Esc now also
+  dismiss a pending confirmation so a dialog can't leave you stuck.
+- **Much richer knowledge base**: full node schemas (inputs, types, defaults, enums, tooltips,
+  outputs), bundled example workflows, the custom-node/manager registry (5,900+ packs, node→pack map,
+  model list), plus the GitHub wiki and README on top of the official docs.
+- **Semantic (hybrid) search**: embeddings via the provider's `/embeddings` fused with keyword search
+  (LM Studio, Ollama, OpenAI-compatible; keyword-only fallback). Embedding model auto-detected.
+- New Settings for the extra sources and the embedding model; KB status shows per-source counts.
+
+### 0.3.0
+
+- Sped up multi-step workflow edits: the assistant now batches changes into a single
+  `apply_workflow_edits` call (one step, one undo) instead of many separate tool calls, no longer
+  makes redundant `validate_workflow`/`layout_workflow` round-trips (the app does both automatically),
+  and keeps the system/tool prompt prefix stable so local models can reuse their prompt cache.
+- Added **mid-run steering**: while the assistant is working, type a correction and press Enter to
+  queue a new instruction for its next step, without cancelling the run. Steering messages are marked
+  with a `↪` and corrections also nudge the lesson memory.
+- Added a **workflow-task test suite** (**Settings → Test workflow tasks**): from an empty canvas it
+  builds a workflow from your description (using only installed nodes + the KB — no hints), then runs
+  a fixed set of increasingly hard modifications (set a value, add/wire a resize, math-driven
+  resolution, arrange, prompt-from-image) and a diagnose step where you delete nodes. You judge each
+  task **Yes/No**; your workflow is restored afterwards.
+- Added a standard-library `unittest` suite under `tests/` (provider/parser, storage/memory/KB
+  helpers, KB indexer helpers).
+- Added `tests/install_fixtures.py` and the test image `tests/fixtures/vision_red.png` for the image task.
 
 ### 0.2.0
 

@@ -42,7 +42,6 @@
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   user-select: none;
   touch-action: none;
-  will-change: transform;
 }
 
 #ccb-root .ccb-fab:active {
@@ -67,11 +66,15 @@
   border-radius: 12px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
   overflow: hidden;
-  will-change: transform;
 }
 
 #ccb-root .ccb-panel.ccb-open {
   display: flex;
+}
+
+#ccb-root .ccb-panel.ccb-yield {
+  pointer-events: none;
+  opacity: 0.35;
 }
 
 #ccb-root .ccb-header {
@@ -168,11 +171,48 @@
   border: 1px solid var(--ccb-border);
 }
 
+#ccb-root .ccb-msg.ccb-steer {
+  align-self: flex-end;
+  background: rgba(79, 140, 255, 0.14);
+  border: 1px dashed var(--ccb-accent);
+  color: var(--ccb-text);
+  font-style: italic;
+}
+
 #ccb-root .ccb-msg.ccb-error {
   align-self: flex-start;
   background: rgba(217, 84, 79, 0.16);
   border: 1px solid var(--ccb-danger);
   color: #ffbcb9;
+}
+
+#ccb-root .ccb-test-row {
+  align-self: flex-start;
+  max-width: 92%;
+  padding: 4px 9px;
+  border-left: 3px solid var(--ccb-border);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#ccb-root .ccb-test-pass {
+  border-color: #4ec97b;
+}
+
+#ccb-root .ccb-test-fail {
+  border-color: var(--ccb-danger);
+  color: #ffbcb9;
+}
+
+#ccb-root .ccb-test-skip {
+  border-color: var(--ccb-muted);
+  color: var(--ccb-muted);
+}
+
+#ccb-root .ccb-test-info {
+  color: var(--ccb-muted);
 }
 
 #ccb-root .ccb-tool {
@@ -377,54 +417,14 @@
   min-height: 16px;
 }
 
-#ccb-root .ccb-modal {
-  position: fixed;
-  inset: 0;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
-  pointer-events: auto;
-}
-
-#ccb-root .ccb-modal.ccb-open {
-  display: flex;
-}
-
-#ccb-root .ccb-dialog {
-  width: 440px;
-  max-width: 92vw;
-  max-height: 80vh;
-  overflow-y: auto;
-  background: var(--ccb-panel);
-  border: 1px solid var(--ccb-border);
-  border-radius: 12px;
-  padding: 16px;
-  font-size: 13px;
-}
-
-#ccb-root .ccb-dialog h3 {
-  margin: 0 0 10px;
-  font-size: 15px;
-}
-
-#ccb-root .ccb-dialog pre {
-  background: var(--ccb-bg);
-  border: 1px solid var(--ccb-border);
-  border-radius: 6px;
-  padding: 8px;
-  max-height: 220px;
-  overflow: auto;
-  font-size: 11px;
+#ccb-root .ccb-card-text {
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-#ccb-root .ccb-dialog .ccb-card-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 14px;
+#ccb-root .ccb-card .ccb-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 #ccb-root .ccb-typing::after {

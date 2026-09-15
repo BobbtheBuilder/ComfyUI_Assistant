@@ -14,7 +14,6 @@ except ImportError:
     from debug import debug_log as _debug_log
 
 ANTHROPIC_VERSION = "2023-06-01"
-DEFAULT_TIMEOUT = 300.0
 
 DATA_URL_RE = re.compile(r"^data:(?P<media>[^;,]+);base64,(?P<data>.*)$", re.S)
 
@@ -24,7 +23,7 @@ def _base_url(config: Mapping[str, Any]) -> str:
 
 
 def _timeout() -> aiohttp.ClientTimeout:
-    return aiohttp.ClientTimeout(total=DEFAULT_TIMEOUT)
+    return aiohttp.ClientTimeout(total=None)
 
 
 def _is_anthropic(config: Mapping[str, Any]) -> bool:
@@ -137,6 +136,10 @@ def _anthropic_content(content: Any) -> Any:
     return blocks or str(content)
 
 
+def _content_blocks(content: Any) -> list[dict[str, Any]]:
+    return content if isinstance(content, list) else [{"type": "text", "text": str(content)}]
+
+
 def _anthropic_messages(messages: list[Mapping[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
     system_parts: list[str] = []
     converted: list[dict[str, Any]] = []
@@ -177,7 +180,13 @@ def _anthropic_messages(messages: list[Mapping[str, Any]]) -> tuple[str, list[di
             converted.append({"role": "assistant", "content": blocks or str(message.get("content", ""))})
             continue
         converted.append({"role": "user", "content": _anthropic_content(message.get("content", ""))})
-    return "\n\n".join(part for part in system_parts if part), converted
+    merged: list[dict[str, Any]] = []
+    for message in converted:
+        if merged and merged[-1]["role"] == message["role"]:
+            merged[-1]["content"] = _content_blocks(merged[-1]["content"]) + _content_blocks(message["content"])
+        else:
+            merged.append(message)
+    return "\n\n".join(part for part in system_parts if part), merged
 
 
 async def _openai_chat(
@@ -212,6 +221,9 @@ async def _openai_chat(
                     event = json.loads(data)
                 except json.JSONDecodeError:
                     continue
+                if event.get("error"):
+                    yield {"type": "error", "error": str(event["error"])}
+                    return
                 choices = event.get("choices") or []
                 if not choices:
                     continue
@@ -484,6 +496,73 @@ async def summarize(config: Mapping[str, Any], text: str) -> str:
         return ""
     message = choices[0].get("message", {})
     return str(message.get("content") or "").strip()
+
+
+_EMBED_HINTS = ("embed", "bge", "nomic", "mxbai", "minilm", "gte", "e5", "text-embedding")
+
+
+async def embedding_models(config: Mapping[str, Any]) -> list[str]:
+    """Return embedding-capable model ids for the configured provider."""
+    provider = config.get("provider")
+    root = _api_root(config)
+    if provider == "lmstudio":
+        try:
+            async with aiohttp.ClientSession(timeout=_timeout()) as session:
+                async with session.get(f"{root}/api/v0/models", headers=_headers(config)) as response:
+                    if response.status < 400:
+                        payload = await response.json()
+                        if isinstance(payload, Mapping):
+                            return [
+                                str(item.get("id"))
+                                for item in payload.get("data", [])
+                                if isinstance(item, Mapping) and str(item.get("type", "")).lower() == "embeddings"
+                            ]
+        except (aiohttp.ClientError, ValueError):
+            return []
+        return []
+    if provider == "anthropic":
+        return []
+    try:
+        models = await list_models(config)
+    except Exception:
+        return []
+    return [model for model in models if any(hint in model.lower() for hint in _EMBED_HINTS)]
+
+
+def _embedding_vectors(payload: Any) -> list[list[float]]:
+    items = payload.get("data", []) if isinstance(payload, Mapping) else []
+    ordered = sorted(items, key=lambda item: item.get("index", 0) if isinstance(item, Mapping) else 0)
+    return [list(item.get("embedding", [])) for item in ordered if isinstance(item, Mapping)]
+
+
+async def _ollama_embed(session: aiohttp.ClientSession, config: Mapping[str, Any], texts: list[str], model: str) -> list[list[float]]:
+    url = f"{_api_root(config)}/api/embed"
+    async with session.post(url, headers=_headers(config), json={"model": model, "input": texts}) as response:
+        if response.status >= 400:
+            raise RuntimeError(await _read_error(response))
+        payload = await response.json()
+    return [list(vector) for vector in (payload.get("embeddings", []) if isinstance(payload, Mapping) else [])]
+
+
+async def embed(config: Mapping[str, Any], texts: list[str], model: str = "") -> list[list[float]]:
+    texts = [text for text in texts if text and text.strip()]
+    if not texts:
+        return []
+    model = str(model or config.get("embed_model") or "").strip()
+    url = f"{_base_url(config)}/embeddings"
+    body = {"model": model, "input": texts}
+    async with aiohttp.ClientSession(timeout=_timeout()) as session:
+        async with session.post(url, headers=_headers(config), json=body) as response:
+            if response.status >= 400:
+                if config.get("provider") == "ollama":
+                    return await _ollama_embed(session, config, texts, model)
+                raise RuntimeError(await _read_error(response))
+            payload = await response.json()
+    vectors = _embedding_vectors(payload)
+    if not vectors and config.get("provider") == "ollama":
+        async with aiohttp.ClientSession(timeout=_timeout()) as session:
+            return await _ollama_embed(session, config, texts, model)
+    return vectors
 
 
 async def unload_models(config: Mapping[str, Any]) -> dict[str, Any]:

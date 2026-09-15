@@ -16,6 +16,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "and search the web. "
     "Use the provided tools to read the workflow, inspect nodes, add or remove nodes, connect "
     "and disconnect links, set widget values, and move nodes. "
+    "For any change that needs more than one edit, call apply_workflow_edits once with all "
+    "operations in order instead of calling the single tools repeatedly; the app validates the "
+    "connections and arranges the graph automatically afterwards. "
     "Use search_docs and get_node_docs to ground explanations in the installed packs' documentation "
     "and the official ComfyUI docs; call them before guessing what a node does. "
     "Only use node types that exist in the user's installation; call search_installed_nodes first "
@@ -28,8 +31,6 @@ DEFAULT_SYSTEM_PROMPT = (
     "When the user refers to \"this\", \"these\", or \"the selected node(s)\", act on the nodes listed "
     "in the canvas selection. When you explain how a node or a part of the workflow works, call "
     "highlight_nodes with the ids you are referring to so the user can see them on the canvas. "
-    "After adding or rewiring nodes, call validate_workflow to confirm all required inputs are "
-    "connected and fix any that are not, then call layout_workflow to arrange them readably. "
     "When the user corrects a mistake or states a lasting preference, call remember_lesson with a "
     "short, general rule so it is not repeated in future sessions."
 )
@@ -59,6 +60,13 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "auto_official": True,
         "refresh_days": 7,
+        "examples": True,
+        "registry": True,
+        "extended_official": True,
+        "embed": {
+            "enabled": True,
+            "model": "",
+        },
     },
     "images": {
         "always_output": False,
@@ -117,6 +125,17 @@ def _write_json(path: str, payload: Any) -> None:
     os.replace(tmp, path)
 
 
+def _merge_config(target: dict[str, Any], values: Mapping[str, Any], defaults: Mapping[str, Any]) -> None:
+    for key, value in values.items():
+        if key not in defaults:
+            continue
+        if isinstance(defaults[key], Mapping):
+            if isinstance(value, Mapping):
+                _merge_config(target[key], value, defaults[key])
+        elif key != "api_key" or value:
+            target[key] = deepcopy(value)
+
+
 class ConfigStore:
     def __init__(self, path: str = CONFIG_PATH, history_path: str = HISTORY_PATH):
         self._path = path
@@ -128,12 +147,7 @@ class ConfigStore:
         config = deepcopy(DEFAULTS)
         stored = _read_json(self._path)
         if isinstance(stored, dict):
-            for key, default in DEFAULTS.items():
-                if isinstance(default, dict):
-                    if isinstance(stored.get(key), dict):
-                        config[key].update({k: v for k, v in stored[key].items() if k in default})
-                elif key in stored:
-                    config[key] = stored[key]
+            _merge_config(config, stored, DEFAULTS)
         return config
 
     def snapshot(self, include_secrets: bool = False) -> dict[str, Any]:
@@ -142,10 +156,10 @@ class ConfigStore:
         config["base_url"] = config.get("base_url") or DEFAULT_BASE_URLS.get(config["provider"], "")
         config["system_prompt_default"] = DEFAULT_SYSTEM_PROMPT
         if not include_secrets:
-            config["api_key_configured"] = bool(self._config.get("api_key"))
+            config["api_key_configured"] = bool(config.get("api_key"))
             config["api_key"] = ""
             websearch = config.get("websearch", {})
-            websearch["api_key_configured"] = bool(self._config.get("websearch", {}).get("api_key"))
+            websearch["api_key_configured"] = bool(websearch.get("api_key"))
             websearch["api_key"] = ""
         return config
 
@@ -153,23 +167,10 @@ class ConfigStore:
         if not isinstance(values, Mapping):
             raise ValueError("Configuration body must be a JSON object.")
         with self._lock:
-            for key, value in values.items():
-                if isinstance(DEFAULTS.get(key), Mapping):
-                    if not isinstance(value, Mapping):
-                        continue
-                    target = self._config.setdefault(key, {})
-                    for sub_key, sub_value in value.items():
-                        if sub_key not in DEFAULTS[key]:
-                            continue
-                        if sub_key == "api_key" and not sub_value:
-                            continue
-                        target[sub_key] = sub_value
-                elif key == "api_key":
-                    if value:
-                        self._config["api_key"] = value
-                elif key in DEFAULTS:
-                    self._config[key] = value
-            _write_json(self._path, self._config)
+            config = deepcopy(self._config)
+            _merge_config(config, values, DEFAULTS)
+            _write_json(self._path, config)
+            self._config = config
             return self.snapshot(include_secrets=False)
 
     def resolved(self) -> dict[str, Any]:
