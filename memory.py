@@ -70,6 +70,21 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
 
 
 _COLUMNS = "id, text, tags, source, created_at, updated_at, enabled, pinned"
+_SELECT_ALL = "SELECT " + _COLUMNS + " FROM lessons"
+_SELECT_ENABLED = _SELECT_ALL + " WHERE enabled = 1"
+_SELECT_ALL_ORDERED = _SELECT_ALL + " ORDER BY pinned DESC, updated_at DESC"
+_SELECT_ENABLED_ORDERED = _SELECT_ENABLED + " ORDER BY pinned DESC, updated_at DESC"
+_SELECT_ENABLED_PINNED = _SELECT_ENABLED + " AND pinned = 1 ORDER BY updated_at DESC"
+_SELECT_ENABLED_LIMIT = _SELECT_ENABLED + " ORDER BY updated_at DESC LIMIT ?"
+_SEARCH_SQL = (
+    "SELECT " + ", ".join("l." + column for column in _COLUMNS.split(", "))
+    + " FROM lessons_fts JOIN lessons l ON l.id = lessons_fts.rowid "
+    "WHERE lessons_fts MATCH ? AND l.enabled = 1 ORDER BY bm25(lessons_fts) LIMIT ?"
+)
+_UPDATE_SQL = (
+    "UPDATE lessons SET text = COALESCE(?, text), tags = COALESCE(?, tags), "
+    "enabled = COALESCE(?, enabled), pinned = COALESCE(?, pinned), updated_at = ? WHERE id = ?"
+)
 
 
 def list_lessons(enabled_only: bool = False) -> list[dict[str, Any]]:
@@ -77,10 +92,7 @@ def list_lessons(enabled_only: bool = False) -> list[dict[str, Any]]:
         conn = _connect()
         try:
             _init(conn)
-            query = f"SELECT {_COLUMNS} FROM lessons"
-            if enabled_only:
-                query += " WHERE enabled = 1"
-            query += " ORDER BY pinned DESC, updated_at DESC"
+            query = _SELECT_ENABLED_ORDERED if enabled_only else _SELECT_ALL_ORDERED
             return [_row_to_dict(row) for row in conn.execute(query).fetchall()]
         finally:
             conn.close()
@@ -97,7 +109,7 @@ def add_lesson(text: str, tags: str = "", source: str = "user", pinned: bool = F
         try:
             _init(conn)
             normalized = _normalize(text)
-            for row in conn.execute(f"SELECT {_COLUMNS} FROM lessons WHERE enabled = 1").fetchall():
+            for row in conn.execute(_SELECT_ENABLED).fetchall():
                 existing = _row_to_dict(row)
                 if _normalize(existing["text"]) == normalized:
                     conn.execute(
@@ -124,32 +136,27 @@ def update_lesson(
     enabled: bool | None = None,
     pinned: bool | None = None,
 ) -> bool:
-    fields: list[str] = []
-    values: list[Any] = []
     if text is not None:
         if not text.strip():
             raise ValueError("Lesson text is required.")
-        fields.append("text = ?")
-        values.append(text.strip())
+        text = text.strip()
     if tags is not None:
-        fields.append("tags = ?")
-        values.append(tags.strip())
-    if enabled is not None:
-        fields.append("enabled = ?")
-        values.append(1 if enabled else 0)
-    if pinned is not None:
-        fields.append("pinned = ?")
-        values.append(1 if pinned else 0)
-    if not fields:
+        tags = tags.strip()
+    if text is None and tags is None and enabled is None and pinned is None:
         return False
-    fields.append("updated_at = ?")
-    values.append(time.time())
-    values.append(int(lesson_id))
+    values = (
+        text,
+        tags,
+        None if enabled is None else (1 if enabled else 0),
+        None if pinned is None else (1 if pinned else 0),
+        time.time(),
+        int(lesson_id),
+    )
     with _lock:
         conn = _connect()
         try:
             _init(conn)
-            cursor = conn.execute(f"UPDATE lessons SET {', '.join(fields)} WHERE id = ?", values)
+            cursor = conn.execute(_UPDATE_SQL, values)
             conn.commit()
             return cursor.rowcount > 0
         finally:
@@ -188,9 +195,7 @@ def search(query: str, limit: int = 8) -> list[dict[str, Any]]:
         try:
             _init(conn)
             rows = conn.execute(
-                f"SELECT {', '.join('l.' + column.strip() for column in _COLUMNS.split(','))} "
-                "FROM lessons_fts JOIN lessons l ON l.id = lessons_fts.rowid "
-                "WHERE lessons_fts MATCH ? AND l.enabled = 1 ORDER BY bm25(lessons_fts) LIMIT ?",
+                _SEARCH_SQL,
                 (match, max(1, min(int(limit), 30))),
             ).fetchall()
             return [_row_to_dict(row) for row in rows]
@@ -204,9 +209,7 @@ def relevant(query: str, limit: int = 8) -> list[dict[str, Any]]:
         conn = _connect()
         try:
             _init(conn)
-            pinned = [_row_to_dict(row) for row in conn.execute(
-                f"SELECT {_COLUMNS} FROM lessons WHERE enabled = 1 AND pinned = 1 ORDER BY updated_at DESC"
-            ).fetchall()]
+            pinned = [_row_to_dict(row) for row in conn.execute(_SELECT_ENABLED_PINNED).fetchall()]
             results = list(pinned)
             seen = {item["id"] for item in results}
             if query.strip():
@@ -215,10 +218,7 @@ def relevant(query: str, limit: int = 8) -> list[dict[str, Any]]:
                         seen.add(item["id"])
                         results.append(item)
             else:
-                for row in conn.execute(
-                    f"SELECT {_COLUMNS} FROM lessons WHERE enabled = 1 ORDER BY updated_at DESC LIMIT ?",
-                    (limit,),
-                ):
+                for row in conn.execute(_SELECT_ENABLED_LIMIT, (limit,)):
                     item = _row_to_dict(row)
                     if item["id"] not in seen:
                         seen.add(item["id"])
