@@ -8,7 +8,7 @@ from typing import Any, Mapping
 from aiohttp import web
 from server import PromptServer
 
-from . import console, debug, installer, kb, memory, providers, websearch
+from . import console, debug, kb, memory, providers, websearch
 from .config_store import CONFIG_STORE
 
 routes = PromptServer.instance.routes
@@ -207,29 +207,6 @@ async def web_search(request: web.Request) -> web.Response:
         return web.json_response({"results": results})
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=502)
-
-
-@routes.post("/chatbot/install_git")
-async def install_git(request: web.Request) -> web.Response:
-    try:
-        payload = await _json_object(request)
-    except json.JSONDecodeError:
-        return web.json_response({"error": "Invalid JSON body."}, status=400)
-    url = str(payload.get("url") or "").strip()
-    if not url:
-        return web.json_response({"error": "Missing repository URL."}, status=400)
-    result = await asyncio.to_thread(installer.git_install, url, payload.get("name"), payload.get("run_pip", True))
-    debug.log(
-        "install",
-        "git_install.done",
-        level="info" if result.get("ok") else "error",
-        url=url,
-        name=payload.get("name"),
-        ok=bool(result.get("ok")),
-        pip_ok=result.get("pip_ok"),
-        error=result.get("error"),
-    )
-    return web.json_response(result, status=200 if result.get("ok") else 400)
 
 
 @routes.get("/chatbot/kb/status")

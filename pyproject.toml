@@ -1,0 +1,13 @@
+[project]
+name = "comfy-assistant"
+version = "0.4.3"
+description = "Floating chat assistant in the ComfyUI graph editor: reads/edits the active workflow, local docs knowledge base with semantic search, memory, vision, web search, and a workflow-task test suite."
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/BobbtheBuilder/ComfyUI_Assistant"
+
+[tool.comfy]
+PublisherId = "who117"
+DisplayName = "ComfyUI Assistant"

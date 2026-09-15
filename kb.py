@@ -4,7 +4,6 @@ import json
 import os
 import re
 import sqlite3
-import subprocess
 import threading
 import time
 import urllib.request
@@ -45,8 +44,6 @@ MAX_FILE_BYTES = 2_000_000
 
 EXAMPLE_DIR_NAMES = {"example_workflows", "example_workflow", "examples", "workflows"}
 README_URL = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
-WIKI_GIT_URL = "https://github.com/comfyanonymous/ComfyUI.wiki.git"
-WIKI_DIR = os.path.join(CACHE_DIR, "wiki")
 EMBED_BATCH = 32
 EMBED_MAX_CHARS = 2000
 
@@ -618,19 +615,6 @@ def _fetch_url_text(url: str) -> str:
         return response.read().decode("utf-8", errors="replace")
 
 
-def _clone_wiki() -> None:
-    if os.path.isdir(os.path.join(WIKI_DIR, ".git")):
-        subprocess.run(["git", "-C", WIKI_DIR, "pull", "--ff-only"], capture_output=True, timeout=300, check=False)
-        return
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    subprocess.run(
-        ["git", "clone", "--depth", "1", WIKI_GIT_URL, WIKI_DIR],
-        capture_output=True,
-        timeout=600,
-        check=True,
-    )
-
-
 def index_extended_official() -> int:
     conn = _connect()
     try:
@@ -638,24 +622,6 @@ def index_extended_official() -> int:
         conn.execute("DELETE FROM chunks WHERE source_kind = 'official' AND url LIKE 'ext:%'")
         records = []
         _set_progress("Indexing extended docs", 0, 0)
-        try:
-            _clone_wiki()
-        except Exception as exc:
-            _debug_log("kb", "wiki.fetch_error", level="warning", error=str(exc))
-        for dirpath, dirnames, filenames in os.walk(WIKI_DIR):
-            dirnames[:] = [name for name in dirnames if name != ".git"]
-            for name in filenames:
-                if not name.lower().endswith((".md", ".mdx")):
-                    continue
-                try:
-                    with open(os.path.join(dirpath, name), "r", encoding="utf-8", errors="replace") as handle:
-                        text = handle.read()
-                except OSError:
-                    continue
-                page = os.path.splitext(name)[0]
-                url = f"ext:wiki:{page}"
-                for heading, content in _chunks_for_text(_clean_official(text)):
-                    records.append(("official", url, "", None, url, page, heading, content))
         try:
             readme = _fetch_url_text(README_URL)
             url = "ext:comfyui-readme"

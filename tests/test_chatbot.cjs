@@ -178,7 +178,7 @@ test("unknown tools form a barrier and mutations are never classified as lookups
   const c = load(["isLookupTool"]);
   for (const name of ["add_node", "remove_node", "apply_workflow_edits", "set_widget_value",
     "connect_nodes", "disconnect_link", "move_node", "set_prompt", "highlight_nodes",
-    "layout_workflow", "remember_lesson", "install_custom_node", "future_tool"]) {
+    "layout_workflow", "remember_lesson", "suggest_node_pack", "future_tool"]) {
     assert.equal(c.isLookupTool(name), false, name);
   }
 });

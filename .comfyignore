@@ -1,0 +1,5 @@
+# Development-only files kept out of the published registry archive.
+# .comfyignore layers on top of .gitignore (untracked files are already excluded).
+tests/
+graft/
+screenshot.jpg

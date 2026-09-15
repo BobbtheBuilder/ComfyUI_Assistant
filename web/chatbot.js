@@ -372,14 +372,14 @@ const TOOLS = [
   {
     type: "function",
     function: {
-      name: "install_custom_node",
+      name: "suggest_node_pack",
       description:
-        "Install an uninstalled custom node pack by cloning its git repository into custom_nodes. The user must confirm. Requires a full git repository URL.",
+        "Recommend a custom node pack that is not installed by returning its repository URL and how to install it. This does not install anything: the user installs it from ComfyUI-Manager.",
       parameters: {
         type: "object",
         properties: {
-          repo_url: { type: "string", description: "Full git URL, e.g. https://github.com/user/repo" },
-          name: { type: "string", description: "Optional target folder name" },
+          repo_url: { type: "string", description: "Full git repository URL, e.g. https://github.com/user/repo" },
+          name: { type: "string", description: "Optional pack name to search for in ComfyUI-Manager" },
         },
         required: ["repo_url"],
       },
@@ -1972,28 +1972,19 @@ async function getNodeDocs(type, limit) {
   return payload;
 }
 
-async function installCustomNode(repoUrl, name) {
-  if (!repoUrl) return { error: "Missing repo_url." };
-  const confirmed = await confirmDialog(
-    `Clone this repository into custom_nodes and install its requirements?`,
-    `Repository: ${repoUrl}\nFolder: ${name || "derived from URL"}\n\nComfyUI must be restarted after install.`,
-    "Install",
-  );
-  if (!confirmed) return { cancelled: true, message: "User declined the installation." };
-  const response = await api.fetchApi("/chatbot/install_git", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url: repoUrl, name, run_pip: true }),
-  });
-  const payload = await response.json();
-  if (payload.ok) {
-    api.fetchApi("/chatbot/kb/rebuild", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    }).catch(() => {});
+function suggestNodePack(repoUrl, name) {
+  const url = String(repoUrl || "").trim();
+  if (!/^(https?:\/\/|git@|ssh:\/\/)/i.test(url)) {
+    return { error: "Provide a full git repository URL (https://, git@, or ssh://)." };
   }
-  return payload;
+  const packName = String(name || url.split("/").pop() || "").replace(/\.git$/i, "");
+  return {
+    ok: true,
+    repo_url: url,
+    name: packName,
+    install: `Open ComfyUI-Manager in ComfyUI, search for "${packName}" (or use "Install via git URL" with the repository URL), install it, then restart ComfyUI.`,
+    note: "Nothing was installed automatically. Ask the user to install this pack themselves.",
+  };
 }
 
 async function executeTool(name, args) {
@@ -2045,8 +2036,8 @@ async function executeTool(name, args) {
       return searchDocs(args.query, args.limit, args.source);
     case "get_node_docs":
       return getNodeDocs(args.type, args.limit);
-    case "install_custom_node":
-      return installCustomNode(args.repo_url, args.name);
+    case "suggest_node_pack":
+      return suggestNodePack(args.repo_url, args.name);
     default:
       return { error: `Unknown tool: ${name}` };
   }

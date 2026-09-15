@@ -97,8 +97,10 @@ across sessions.
 - The model can **highlight** the nodes it refers to while explaining how they work.
 
 ### Custom nodes
-- Searches the web (Tavily, Brave, or SerpAPI) for node packs and can install one with
-  `git clone --depth 1` and `pip install -r requirements.txt`, after a confirmation dialog.
+- Searches the web (Tavily, Brave, or SerpAPI) for node packs and **recommends** one with its
+  repository URL and install instructions (`suggest_node_pack`). It does **not** install anything
+  itself — you install the pack from **ComfyUI-Manager**. (This keeps the package free of runtime
+  `git`/`pip` subprocess calls, as the Comfy Registry requires.)
 
 ### Providers
 - LM Studio, Ollama, any OpenAI-compatible endpoint, and Anthropic.
@@ -172,7 +174,7 @@ Ask in plain language, for example:
 - "Add a node after the selected one and connect it."
 - "Does the generated image match my prompt? Suggest a better prompt." *(attach the output with the
   paperclip or just mention it)*
-- "What node pack adds face restoration? Install it if it exists."
+- "Which node pack adds face restoration? Give me the repo URL and how to install it."
 - "You used the wrong sampler last time — don't do that again." *(records a lesson)*
 
 The assistant calls tools as needed; you'll see each call in the activity log. Destructive actions
@@ -314,6 +316,15 @@ Bug reports, provider test results, and feature ideas are welcome:
 https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 ## Changelog
+
+### 0.4.3
+
+- Published to the Comfy Registry (`comfy node install comfy-assistant`) and registered in ComfyUI-Manager.
+- Replaced the `install_custom_node` tool with **`suggest_node_pack`**: the assistant now only
+  recommends a pack (repo URL + install steps) and you install it via ComfyUI-Manager. Removed all
+  runtime `git`/`pip` subprocess calls (the pack installer and the docs-wiki clone) to comply with the
+  registry's security standards. The knowledge base's "extended docs" source is now the ComfyUI
+  README (fetched over HTTP) instead of the cloned GitHub wiki.
 
 ### 0.4.2
 
