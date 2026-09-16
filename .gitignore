@@ -5,6 +5,8 @@ kb_index.sqlite-*
 kb_cache/
 assistant_memory.sqlite
 assistant_memory.sqlite-*
+assistant_knowledge.sqlite
+assistant_knowledge.sqlite-*
 debug.log
 debug.log*
 tests/report.json

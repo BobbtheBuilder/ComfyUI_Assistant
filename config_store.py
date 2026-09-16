@@ -23,6 +23,11 @@ DEFAULT_SYSTEM_PROMPT = (
     "and the official ComfyUI docs; call them before guessing what a node does. "
     "Only use node types that exist in the user's installation; call search_installed_nodes first "
     "when you are unsure. Prefer asking a short clarifying question before making large changes. "
+    "Before choosing model-specific nodes, call get_build_context to consult the local compatibility "
+    "knowledge for the target model and task. ComfyUI socket types such as MODEL, CLIP, VAE, LATENT, "
+    "and CONDITIONING are generic and do not prove model compatibility. Treat UNKNOWN compatibility as "
+    "unresolved: request resolution or report the missing requirement instead of substituting a "
+    "component from another family. "
     "When you recommend a custom node pack that is not installed, give the repository URL and tell "
     "the user to install it from ComfyUI-Manager (search the pack name), then restart. "
     "Use suggest_node_pack for this. "
@@ -49,7 +54,7 @@ DEFAULTS: dict[str, Any] = {
     "api_key": "",
     "model": "",
     "temperature": 0.7,
-    "max_tokens": 2048,
+    "max_tokens": 0,
     "use_native_tools": True,
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "websearch": {
@@ -61,9 +66,25 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "auto_official": True,
         "refresh_days": 7,
+        "rebuild_on_startup": False,
         "examples": True,
         "registry": True,
         "extended_official": True,
+        "knowledge": True,
+        "enrich": {
+            "enabled": True,
+            "model": "",
+            "web": True,
+            "max_packs_per_run": 5,
+            "max_web_queries_per_pack": 3,
+            "batch_size": 20,
+            "max_attempts": 3,
+            "max_tokens": 0,
+            "json_mode": "schema",
+            "idle_only": True,
+            "interval_seconds": 5,
+            "start_delay": 30,
+        },
         "embed": {
             "enabled": True,
             "model": "",
@@ -97,6 +118,10 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "auto_detect": True,
         "inject_limit": 8,
+    },
+    "controller": {
+        "enabled": True,
+        "research": True,
     },
     "unload": {
         "on_execute": True,

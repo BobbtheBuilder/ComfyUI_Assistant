@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import time
 from typing import Any, AsyncIterator, Mapping
 
@@ -15,7 +16,28 @@ except ImportError:
 
 ANTHROPIC_VERSION = "2023-06-01"
 
-DATA_URL_RE = re.compile(r"^data:(?P<media>[^;,]+);base64,(?P<data>.*)$", re.S)
+DATA_URL_RE = re.compile(r"^data:(?:(?P<media>[^;,]+));base64,(?P<data>.*)$", re.S)
+
+# Count of in-flight LLM requests, so background enrichment can yield to interactive chat.
+_active_chats = 0
+_active_lock = threading.Lock()
+
+
+def _begin_chat() -> None:
+    global _active_chats
+    with _active_lock:
+        _active_chats += 1
+
+
+def _end_chat() -> None:
+    global _active_chats
+    with _active_lock:
+        _active_chats = max(0, _active_chats - 1)
+
+
+def active_chats() -> int:
+    with _active_lock:
+        return _active_chats
 
 
 def _base_url(config: Mapping[str, Any]) -> str:
@@ -189,16 +211,28 @@ def _anthropic_messages(messages: list[Mapping[str, Any]]) -> tuple[str, list[di
     return "\n\n".join(part for part in system_parts if part), merged
 
 
+def _output_token_options(config: Mapping[str, Any], required: bool = False) -> dict[str, int]:
+    limit = int(config.get("max_tokens") or 0)
+    if limit > 0:
+        return {"max_tokens": limit}
+    if required:
+        raise ValueError("This provider requires an output token limit. Set Max tokens in settings.")
+    return {}
+
+
 async def _openai_chat(
-    config: Mapping[str, Any], messages: list[Mapping[str, Any]], tools: list[Mapping[str, Any]]
+    config: Mapping[str, Any], messages: list[Mapping[str, Any]], tools: list[Mapping[str, Any]],
+    response_format: Mapping[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     body: dict[str, Any] = {
         "model": config.get("model"),
         "messages": messages,
         "stream": True,
         "temperature": config.get("temperature", 0.7),
-        "max_tokens": int(config.get("max_tokens", 2048)),
+        **_output_token_options(config),
     }
+    if response_format:
+        body["response_format"] = dict(response_format)
     if tools and config.get("use_native_tools", True):
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -259,7 +293,7 @@ async def _anthropic_chat(
         "messages": anthropic_messages,
         "stream": True,
         "temperature": config.get("temperature", 0.7),
-        "max_tokens": int(config.get("max_tokens", 2048)),
+        **_output_token_options(config, required=True),
     }
     if system:
         body["system"] = system
@@ -306,58 +340,80 @@ async def _anthropic_chat(
 
 
 async def chat_events(
-    config: Mapping[str, Any], messages: list[Mapping[str, Any]], tools: list[Mapping[str, Any]]
+    config: Mapping[str, Any], messages: list[Mapping[str, Any]], tools: list[Mapping[str, Any]],
+    response_format: Mapping[str, Any] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     started = time.time()
     first_text: float | None = None
-    _debug_log(
-        "provider",
-        "chat.start",
-        provider=config.get("provider"),
-        model=config.get("model"),
-        messages=len(messages),
-        tools=len(tools),
-        native_tools=config.get("use_native_tools", True),
-        temperature=config.get("temperature"),
-        max_tokens=config.get("max_tokens"),
-    )
-    if not config.get("model"):
-        yield {"type": "error", "error": "No model selected. Open settings and choose a model."}
-        return
-    if not config.get("use_native_tools", True) and tools:
-        messages = _with_system_protocol(messages, tools)
-
-    async def _relay() -> AsyncIterator[dict[str, Any]]:
-        nonlocal first_text
-        if _is_anthropic(config):
-            stream = _anthropic_chat(config, messages, tools)
-        else:
-            stream = _openai_chat(config, messages, tools)
-        async for event in stream:
-            kind = event.get("type")
-            if kind == "text" and first_text is None:
-                first_text = time.time()
-                _debug_log("provider", "chat.first_token", ms=round((first_text - started) * 1000))
-            elif kind == "done":
-                _debug_log(
-                    "provider",
-                    "chat.done",
-                    finish_reason=event.get("finish_reason"),
-                    ms=round((time.time() - started) * 1000),
-                )
-            elif kind == "error":
-                _debug_log("provider", "chat.error", level="error", error=event.get("error"))
-            yield event
-
+    _begin_chat()
     try:
-        async for event in _relay():
-            yield event
-    except aiohttp.ClientError as exc:
-        _debug_log("provider", "chat.error", level="error", error=f"client error: {exc}")
-        yield {"type": "error", "error": f"Could not reach provider: {exc}"}
-    except asyncio.TimeoutError:
-        _debug_log("provider", "chat.error", level="error", error="timeout")
-        yield {"type": "error", "error": "Provider request timed out."}
+        _debug_log(
+            "provider",
+            "chat.start",
+            provider=config.get("provider"),
+            model=config.get("model"),
+            messages=len(messages),
+            tools=len(tools),
+            native_tools=config.get("use_native_tools", True),
+            temperature=config.get("temperature"),
+            max_tokens=config.get("max_tokens"),
+        )
+        if not config.get("model"):
+            yield {"type": "error", "error": "No model selected. Open settings and choose a model."}
+            return
+        if not config.get("use_native_tools", True) and tools:
+            messages = _with_system_protocol(messages, tools)
+
+        async def _relay() -> AsyncIterator[dict[str, Any]]:
+            nonlocal first_text
+            if _is_anthropic(config):
+                stream = _anthropic_chat(config, messages, tools)
+            else:
+                stream = _openai_chat(config, messages, tools, response_format)
+            async for event in stream:
+                kind = event.get("type")
+                if kind == "text" and first_text is None:
+                    first_text = time.time()
+                    _debug_log("provider", "chat.first_token", ms=round((first_text - started) * 1000))
+                elif kind == "done":
+                    _debug_log(
+                        "provider",
+                        "chat.done",
+                        finish_reason=event.get("finish_reason"),
+                        ms=round((time.time() - started) * 1000),
+                    )
+                elif kind == "error":
+                    _debug_log("provider", "chat.error", level="error", error=event.get("error"))
+                yield event
+
+        try:
+            async for event in _relay():
+                yield event
+        except aiohttp.ClientError as exc:
+            _debug_log("provider", "chat.error", level="error", error=f"client error: {exc}")
+            yield {"type": "error", "error": f"Could not reach provider: {exc}"}
+        except asyncio.TimeoutError:
+            _debug_log("provider", "chat.error", level="error", error="timeout")
+            yield {"type": "error", "error": "Provider request timed out."}
+    finally:
+        _end_chat()
+
+
+async def complete(config: Mapping[str, Any], messages: list[Mapping[str, Any]],
+                   max_tokens: int | None = None,
+                   response_format: Mapping[str, Any] | None = None) -> str:
+    """Non-streaming completion used by background knowledge enrichment."""
+    merged = dict(config)
+    if max_tokens:
+        merged["max_tokens"] = int(max_tokens)
+    parts: list[str] = []
+    async for event in chat_events(merged, messages, [], response_format=response_format):
+        kind = event.get("type")
+        if kind == "text":
+            parts.append(str(event.get("text") or ""))
+        elif kind == "error":
+            raise RuntimeError(str(event.get("error") or "provider error"))
+    return "".join(parts)
 
 
 def _api_root(config: Mapping[str, Any]) -> str:
@@ -458,44 +514,13 @@ async def summarize(config: Mapping[str, Any], text: str) -> str:
     text = (text or "").strip()
     if not text:
         return ""
-    max_tokens = max(256, min(1200, int(config.get("max_tokens", 800) or 800)))
-    if _is_anthropic(config):
-        body = {
-            "model": config.get("model"),
-            "system": SUMMARY_SYSTEM,
-            "messages": [{"role": "user", "content": text}],
-            "max_tokens": max_tokens,
-            "temperature": 0.3,
-        }
-        url = f"{_base_url(config)}/v1/messages"
-        async with aiohttp.ClientSession(timeout=_timeout()) as session:
-            async with session.post(url, headers=_headers(config), json=body) as response:
-                if response.status >= 400:
-                    raise RuntimeError(await _read_error(response))
-                payload = await response.json()
-        parts = [block.get("text", "") for block in payload.get("content", []) if block.get("type") == "text"]
-        return "".join(parts).strip()
-    body = {
-        "model": config.get("model"),
-        "messages": [
-            {"role": "system", "content": SUMMARY_SYSTEM},
-            {"role": "user", "content": text},
-        ],
-        "max_tokens": max_tokens,
-        "temperature": 0.3,
-        "stream": False,
-    }
-    url = f"{_base_url(config)}/chat/completions"
-    async with aiohttp.ClientSession(timeout=_timeout()) as session:
-        async with session.post(url, headers=_headers(config), json=body) as response:
-            if response.status >= 400:
-                raise RuntimeError(await _read_error(response))
-            payload = await response.json()
-    choices = payload.get("choices") or []
-    if not choices:
-        return ""
-    message = choices[0].get("message", {})
-    return str(message.get("content") or "").strip()
+    config = {**config, "temperature": 0.3}
+    return (await complete(config, [
+        {"role": "system", "content": SUMMARY_SYSTEM},
+        {"role": "user", "content": text},
+    ])).strip()
+
+
 
 
 _EMBED_HINTS = ("embed", "bge", "nomic", "mxbai", "minilm", "gte", "e5", "text-embedding")

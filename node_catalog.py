@@ -7,6 +7,12 @@ import json
 from typing import Any
 
 
+def pack_from_module(module: str) -> str:
+    if not module or not module.startswith("custom_nodes."):
+        return ""
+    return module.split(".", 2)[1]
+
+
 def registry():
     import nodes
     return nodes.NODE_CLASS_MAPPINGS, getattr(nodes, "NODE_DISPLAY_NAME_MAPPINGS", {})
@@ -20,7 +26,8 @@ def record(node_type: str) -> dict[str, Any]:
     result = {"name": node_type, "display_name": names.get(node_type, node_type), "available": True,
               "python_module": getattr(cls, "RELATIVE_PYTHON_MODULE", cls.__module__),
               "description": str(getattr(cls, "DESCRIPTION", "") or ""),
-              "category": getattr(cls, "CATEGORY", ""), "source_evidence": []}
+              "category": getattr(cls, "CATEGORY", ""), "source_evidence": [],
+              "search_aliases": [str(item) for item in (getattr(cls, "SEARCH_ALIASES", None) or [])]}
     try:
         if callable(getattr(cls, "GET_NODE_INFO_V1", None)):
             result.update(cls.GET_NODE_INFO_V1())
@@ -38,7 +45,8 @@ def record(node_type: str) -> dict[str, Any]:
         result["schema_error"] = ""
     except Exception as exc:
         result = {"name": node_type, "display_name": names.get(node_type, node_type), "available": True,
-                  "schema_error": str(exc), "source_evidence": [], "description": ""}
+                  "schema_error": str(exc), "source_evidence": [], "description": "",
+                  "search_aliases": [str(item) for item in (getattr(cls, "SEARCH_ALIASES", None) or [])]}
     result["source_evidence"] = []
     for kind, obj in (("class", cls), ("execution", getattr(cls, getattr(cls, "FUNCTION", "execute"), None))):
         if obj is None:

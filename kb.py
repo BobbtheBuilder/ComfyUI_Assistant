@@ -13,8 +13,10 @@ from typing import Any, Mapping
 
 try:
     from . import node_catalog
+    from .node_catalog import pack_from_module as _pack_from_module
 except ImportError:
     import node_catalog
+    from node_catalog import pack_from_module as _pack_from_module
 
 try:
     from .debug import debug_log as _debug_log
@@ -22,9 +24,9 @@ except ImportError:
     from debug import debug_log as _debug_log
 
 try:
-    from .storage import connect, fts_query
+    from .storage import connect, fts_query, schema_version as _schema_version
 except ImportError:
-    from storage import connect, fts_query
+    from storage import connect, fts_query, schema_version as _schema_version
 
 NODE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(NODE_DIR, "kb_index.sqlite")
@@ -46,6 +48,10 @@ EXAMPLE_DIR_NAMES = {"example_workflows", "example_workflow", "examples", "workf
 README_URL = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
 EMBED_BATCH = 32
 EMBED_MAX_CHARS = 2000
+
+# Bump whenever the SQLite schema changes incompatibly. The index is a derived
+# cache, so on mismatch the tables are dropped and rebuilt from source.
+SCHEMA_VERSION = 2
 
 _lock = threading.RLock()
 _state: dict[str, Any] = {
@@ -98,9 +104,7 @@ def _connect() -> sqlite3.Connection:
     return connect(DB_PATH)
 
 
-def _init(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
+_SCHEMA_SQL = """
         CREATE TABLE IF NOT EXISTS chunks (
             id INTEGER PRIMARY KEY,
             source_kind TEXT NOT NULL,
@@ -112,6 +116,9 @@ def _init(conn: sqlite3.Connection) -> None:
             heading TEXT,
             content TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS chunks_kind ON chunks(source_kind);
+        CREATE INDEX IF NOT EXISTS chunks_pack ON chunks(pack);
+        CREATE INDEX IF NOT EXISTS chunks_path ON chunks(path);
         CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, mtime REAL, size INTEGER);
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS node_records (name TEXT PRIMARY KEY, record TEXT NOT NULL);
@@ -145,13 +152,37 @@ def _init(conn: sqlite3.Connection) -> None:
             INSERT INTO meta(key, value) VALUES ('embeddings_revision', '1')
             ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
         END;
-        -- Old vectors may already refer to reused chunk IDs. Rebuild them once.
-        DELETE FROM embeddings WHERE NOT EXISTS (
-            SELECT 1 FROM meta WHERE key = 'embeddings_cleanup_v1'
-        );
-        INSERT OR IGNORE INTO meta(key, value) VALUES ('embeddings_cleanup_v1', '1');
-        """
-    )
+"""
+
+_DROP_SQL = """
+        DROP TRIGGER IF EXISTS chunks_ai;
+        DROP TRIGGER IF EXISTS chunks_ad;
+        DROP TRIGGER IF EXISTS chunks_embeddings_ad;
+        DROP TRIGGER IF EXISTS embeddings_ai;
+        DROP TRIGGER IF EXISTS embeddings_au;
+        DROP TRIGGER IF EXISTS embeddings_ad;
+        DROP TABLE IF EXISTS chunks_fts;
+        DROP TABLE IF EXISTS embeddings;
+        DROP TABLE IF EXISTS node_examples;
+        DROP TABLE IF EXISTS node_records;
+        DROP TABLE IF EXISTS chunks;
+        DROP TABLE IF EXISTS files;
+        DROP TABLE IF EXISTS meta;
+"""
+
+
+def _init(conn: sqlite3.Connection) -> None:
+    current = _schema_version(conn)
+    # 0 means a fresh or pre-versioning database; the current schema is a superset,
+    # so those are adopted in place. A different explicit version is rebuilt.
+    if current and current != SCHEMA_VERSION:
+        conn.executescript(_DROP_SQL)
+        _debug_log("kb", "schema.rebuild", previous=current, current=SCHEMA_VERSION)
+        current = 0
+    conn.executescript(_SCHEMA_SQL)
+    if current != SCHEMA_VERSION:
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)", (str(SCHEMA_VERSION),))
+        conn.commit()
 
 
 def _meta_get(key: str) -> str:
@@ -217,12 +248,6 @@ def _pack_for_path(path: str, root: str) -> str:
     return os.path.relpath(path, root).split(os.sep)[0]
 
 
-def _pack_from_module(module: str) -> str:
-    if not module or not module.startswith("custom_nodes."):
-        return ""
-    return module.split(".", 2)[1]
-
-
 def _insert_chunks(conn: sqlite3.Connection, records: list[tuple]) -> None:
     conn.executemany(
         "INSERT INTO chunks (source_kind, source, pack, path, url, title, heading, content) "
@@ -267,12 +292,12 @@ def index_local() -> int:
         total = len(changed)
         _set_progress("Indexing pack docs", 0, total)
         for index, path in enumerate(changed, start=1):
-            conn.execute("DELETE FROM chunks WHERE path = ?", (path,))
             try:
                 with open(path, "r", encoding="utf-8", errors="replace") as handle:
                     text = handle.read()
             except OSError:
                 continue
+            conn.execute("DELETE FROM chunks WHERE path = ?", (path,))
             mtime, size, pack, rel = current[path]
             title = f"{pack}/{rel}" if pack else rel
             records = [
@@ -322,6 +347,9 @@ def _node_content(info: dict[str, Any]) -> str:
         lines.append(f"Module: {info['python_module']}")
     if info.get("description"):
         lines.append(str(info["description"]))
+    aliases = info.get("search_aliases") or []
+    if aliases:
+        lines.append("Aliases: " + ", ".join(str(item) for item in aliases))
     inputs = info.get("input") or {}
     for group in ("required", "optional"):
         for input_name, spec in (inputs.get(group) or {}).items():
@@ -783,7 +811,8 @@ def _load_vectors(conn: sqlite3.Connection) -> tuple[Any, Any]:
     return id_array, matrix
 
 
-def _vector_search(conn: sqlite3.Connection, query: str, limit: int, source: str | None) -> list[tuple[int, dict[str, Any]]]:
+def _vector_search(conn: sqlite3.Connection, query: str, limit: int, source: str | None,
+                   pack: str | None = None) -> list[tuple[int, dict[str, Any]]]:
     config, model = _embed_settings()
     if config is None:
         return []
@@ -825,6 +854,8 @@ def _vector_search(conn: sqlite3.Connection, query: str, limit: int, source: str
             continue
         if source and row[0] != source:
             continue
+        if pack and (row[2] or "") != pack:
+            continue
         results.append((chunk_id, _row_to_result(row, query)))
         if len(results) >= limit:
             break
@@ -846,6 +877,13 @@ def _refresh_counts() -> None:
         fetched = _meta_get("official_fetched_at")
         _state["official_fetched_at"] = float(fetched) if fetched else 0.0
         _state["official_fetched_iso"] = _iso(_state["official_fetched_at"])
+        built = _meta_get("build_at")
+        if built:
+            try:
+                _state["last_build"] = float(built)
+                _state["last_build_iso"] = _iso(_state["last_build"])
+            except (TypeError, ValueError):
+                pass
     finally:
         conn.close()
 
@@ -877,6 +915,118 @@ def compact(full: bool = True) -> dict[str, Any]:
     return {"before_mb": round(before / 1e6, 1), "after_mb": round(after / 1e6, 1), "freed_mb": round(freed / 1e6, 1)}
 
 
+def _stop_enrichment() -> None:
+    """Pause background enrichment so the index build gets the hardware."""
+    try:
+        try:
+            from . import enrich
+        except ImportError:
+            import enrich
+        enrich.stop()
+    except Exception:
+        pass
+
+
+def _maybe_start_enrichment() -> None:
+    """Start the idle enrichment worker only after the index build has fully finished."""
+    enrich_config = (_kb_config().get("enrich", {}) or {})
+    if enrich_config.get("enabled", True) is False:
+        return
+    start_delay = float(enrich_config.get("start_delay", 30) or 0)
+    try:
+        try:
+            from . import enrich
+        except ImportError:
+            import enrich
+    except Exception:
+        return
+
+    def delayed() -> None:
+        if start_delay > 0:
+            time.sleep(start_delay)
+        try:
+            enrich.start_worker()
+        except Exception as exc:
+            _debug_log("kb", "enrich.error", level="warning", error=str(exc))
+
+    threading.Thread(target=delayed, name="ComfyUIAssistantEnrichStart", daemon=True).start()
+
+
+def _pack_fingerprint() -> str:
+    import hashlib
+    try:
+        import folder_paths
+        roots = folder_paths.get_folder_paths("custom_nodes")
+    except Exception:
+        return ""
+    own = os.path.basename(NODE_DIR)
+    entries: list[str] = []
+    for root in roots:
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for name in names:
+            if name == own:
+                continue
+            path = os.path.join(root, name)
+            if not os.path.isdir(path):
+                continue
+            try:
+                mtime = int(os.stat(path).st_mtime)
+            except OSError:
+                mtime = 0
+            entries.append(f"{name}:{mtime}")
+    if not entries:
+        return ""
+    return hashlib.sha256("|".join(entries).encode()).hexdigest()[:16]
+
+
+def _should_skip_build(force: bool) -> bool:
+    """Skip the heavy index only when it is already built and the installed packs are unchanged."""
+    if force or _kb_config().get("rebuild_on_startup", False):
+        return False
+    if not os.path.isfile(DB_PATH):
+        return False
+    conn = _connect()
+    try:
+        current = _schema_version(conn)
+    finally:
+        conn.close()
+    if current == 0 or current != SCHEMA_VERSION:
+        return False
+    if not _meta_get("build_complete"):
+        return False
+    stored = _meta_get("pack_fingerprint")
+    return bool(stored) and stored == _pack_fingerprint()
+
+
+def _skip_build_startup() -> None:
+    _refresh_counts()
+    built = _meta_get("build_at")
+    if built:
+        try:
+            _state["last_build"] = float(built)
+            _state["last_build_iso"] = _iso(_state["last_build"])
+        except (TypeError, ValueError):
+            pass
+    _set_progress("Ready")
+    _debug_log("kb", "build.skipped", reason="already built; installed packs unchanged")
+    enrich_config = (_kb_config().get("enrich", {}) or {})
+    if enrich_config.get("enabled", True) is False:
+        return
+    try:
+        try:
+            from . import enrich
+        except ImportError:
+            import enrich
+        enrich.index_local_facts()
+    except Exception as exc:
+        _debug_log("kb", "enrich.error", level="warning", error=str(exc))
+        return
+    _maybe_start_enrichment()
+
+
 def build(force_official: bool = False, auto_official: bool = True, refresh_days: int = 7, delay: float = 0) -> None:
     if delay:
         time.sleep(delay)
@@ -886,8 +1036,12 @@ def build(force_official: bool = False, auto_official: bool = True, refresh_days
         _state["building"] = True
         _state["error"] = ""
     started = time.time()
-    _debug_log("kb", "build.start", force_official=force_official, auto_official=auto_official)
     try:
+        if _should_skip_build(force_official):
+            _skip_build_startup()
+            return
+        _debug_log("kb", "build.start", force_official=force_official, auto_official=auto_official)
+        _stop_enrichment()
         conn = _connect()
         try:
             _init(conn)
@@ -900,6 +1054,26 @@ def build(force_official: bool = False, auto_official: bool = True, refresh_days
             index_examples()
         if kb_config.get("registry", True):
             index_registry()
+        if kb_config.get("knowledge", True):
+            try:
+                try:
+                    from . import knowledge
+                except ImportError:
+                    import knowledge
+                knowledge.index_knowledge()
+            except Exception as exc:
+                _state["error"] = f"knowledge: {exc}"
+                _debug_log("kb", "knowledge.error", level="warning", error=str(exc))
+            if (kb_config.get("enrich", {}) or {}).get("enabled", True):
+                try:
+                    try:
+                        from . import enrich
+                    except ImportError:
+                        import enrich
+                    # Local facts only; model-driven enrichment waits until the build is finished.
+                    enrich.index_local_facts()
+                except Exception as exc:
+                    _debug_log("kb", "enrich.error", level="warning", error=str(exc))
         if auto_official:
             fetched_at = float(_meta_get("official_fetched_at") or 0)
             stale = (time.time() - fetched_at) > max(1, refresh_days) * 86400
@@ -930,6 +1104,11 @@ def build(force_official: bool = False, auto_official: bool = True, refresh_days
         _state["last_build"] = time.time()
         _state["last_build_iso"] = _iso(_state["last_build"])
         _set_progress("Ready")
+        _meta_set("build_complete", "1")
+        _meta_set("build_at", str(_state["last_build"]))
+        fingerprint = _pack_fingerprint()
+        if fingerprint:
+            _meta_set("pack_fingerprint", fingerprint)
         _debug_log(
             "kb",
             "build.done",
@@ -946,6 +1125,9 @@ def build(force_official: bool = False, auto_official: bool = True, refresh_days
     finally:
         with _lock:
             _state["building"] = False
+    # The index build is done; only now let model-driven enrichment run.
+    if not _state.get("error"):
+        _maybe_start_enrichment()
 
 
 def start_background(
@@ -1032,7 +1214,8 @@ def _row_to_result(row: Any, query: str) -> dict[str, Any]:
     }
 
 
-def _fts_rows(conn: sqlite3.Connection, query: str, limit: int, source: str | None) -> list[tuple[int, dict[str, Any]]]:
+def _fts_rows(conn: sqlite3.Connection, query: str, limit: int, source: str | None,
+              pack: str | None = None) -> list[tuple[int, dict[str, Any]]]:
     match = fts_query(query, min_length=2, limit=12)
     if not match:
         return []
@@ -1045,36 +1228,81 @@ def _fts_rows(conn: sqlite3.Connection, query: str, limit: int, source: str | No
     if source:
         sql += " AND c.source_kind = ?"
         params.append(source)
+    if pack:
+        sql += " AND c.pack = ?"
+        params.append(pack)
     sql += " ORDER BY bm25(chunks_fts) LIMIT ?"
     params.append(max(1, min(limit, 40)))
     return [(int(row[0]), _row_to_result(tuple(row)[1:], query)) for row in conn.execute(sql, params).fetchall()]
 
 
-def _search_conn(conn: sqlite3.Connection, query: str, limit: int, source: str | None) -> list[dict[str, Any]]:
-    return [item for _chunk_id, item in _fts_rows(conn, query, limit, source)]
+def _search_conn(conn: sqlite3.Connection, query: str, limit: int, source: str | None,
+                 pack: str | None = None) -> list[dict[str, Any]]:
+    return [item for _chunk_id, item in _fts_rows(conn, query, limit, source, pack)]
 
 
-def search(query: str, limit: int = 6, source: str | None = None) -> list[dict[str, Any]]:
+def _source_weight(item: Mapping[str, Any]) -> float:
+    """Core (built-in) nodes outrank pack nodes; pack-specific loaders must not shadow core ones."""
+    if item.get("source_kind") == "node" and not item.get("pack"):
+        return 1.5
+    if item.get("source_kind") == "official":
+        return 1.2
+    return 1.0
+
+
+def search(query: str, limit: int = 6, source: str | None = None,
+           pack: str | None = None) -> list[dict[str, Any]]:
     conn = _connect()
     try:
         _init(conn)
         ranked = max(limit * 3, 12)
-        fts = _fts_rows(conn, query, ranked, source)
-        vectors = _vector_search(conn, query, ranked, source)
-        if not vectors:
-            return [item for _chunk_id, item in fts[:limit]]
+        fts = _fts_rows(conn, query, ranked, source, pack)
+        vectors = _vector_search(conn, query, ranked, source, pack)
         scores: dict[int, float] = {}
         items: dict[int, dict[str, Any]] = {}
         for rank, (chunk_id, item) in enumerate(fts):
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + _source_weight(item) / (60 + rank)
             items[chunk_id] = item
         for rank, (chunk_id, item) in enumerate(vectors):
-            scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
+            scores[chunk_id] = scores.get(chunk_id, 0.0) + _source_weight(item) / (60 + rank)
             items.setdefault(chunk_id, item)
         ordered = sorted(scores, key=lambda chunk_id: -scores[chunk_id])[:limit]
-        return [items[chunk_id] for chunk_id in ordered]
+        results: list[dict[str, Any]] = []
+        for rank, chunk_id in enumerate(ordered):
+            item = dict(items[chunk_id])
+            item["score"] = round(scores[chunk_id], 6)
+            item["rank"] = rank
+            results.append(item)
+        return results
     finally:
         conn.close()
+
+
+RETRIEVAL_MODES = {
+    "choose_node": {"prefer": {"node": 2}},
+    "explain_node": {"prefer": {"node": 2, "pack": 1, "official": 1}},
+    "build_for_model": {"prefer": {"node": 2, "example": 1, "official": 1}},
+}
+
+
+def retrieve(mode: str, query: str, limit: int = 8, source: str | None = None,
+             pack: str | None = None) -> list[dict[str, Any]]:
+    """Task-specific retrieval. Falls back to plain hybrid search for unknown modes."""
+    mode = str(mode or "").strip()
+    if mode == "find_package":
+        return search(query, limit, "registry", pack)
+    if mode not in RETRIEVAL_MODES:
+        return search(query, limit, source, pack)
+    results = search(query, max(limit * 2, 12), None if mode != "choose_node" else "node", pack)
+    needle = str(query or "").strip().lower()
+    prefer = RETRIEVAL_MODES[mode]["prefer"]
+
+    def relevance(item: Mapping[str, Any]) -> tuple[int, int, float]:
+        exact = 1 if needle and (str(item.get("source", "")).lower() == needle
+                                 or str(item.get("title", "")).lower() == needle) else 0
+        return (exact, prefer.get(str(item.get("source_kind")), 0), float(item.get("score", 0.0)))
+
+    return sorted(results, key=relevance, reverse=True)[:limit]
 
 
 def node_docs(node_type: str, limit: int = 8) -> dict[str, Any]:

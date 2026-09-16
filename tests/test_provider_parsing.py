@@ -23,6 +23,7 @@ class StreamParsingTest(unittest.IsolatedAsyncioTestCase):
         self.app.router.add_post("/v1/messages", self._anthropic_stream)
         self.app.router.add_post("/v1/bad/chat/completions", self._server_error)
         self.app.router.add_post("/v1/stream-error/chat/completions", self._stream_error)
+        self.app.router.add_post("/v1/echo/chat/completions", self._echo_stream)
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
         site = web.TCPSite(self.runner, "127.0.0.1", 0)
@@ -37,6 +38,38 @@ class StreamParsingTest(unittest.IsolatedAsyncioTestCase):
 
     async def _stream_error(self, request):
         return web.Response(text='data: {"error": {"message": "model failed"}}\n\n', content_type="text/event-stream")
+
+    async def _echo_stream(self, request):
+        self.last_body = await request.json()
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(b'data: {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}\n\n')
+        await response.write(b"data: [DONE]\n\n")
+        return response
+
+    async def test_openai_forwards_response_format(self):
+        config = self._config(f"{self.base}/echo")
+        _ = [event async for event in providers._openai_chat(
+            config, [{"role": "user", "content": "x"}], [], {"type": "json_object"})]
+        self.assertEqual(self.last_body.get("response_format"), {"type": "json_object"})
+        self.assertEqual(self.last_body.get("max_tokens"), 64)
+
+    async def test_openai_zero_omits_output_cap(self):
+        events = [event async for event in providers.chat_events(
+            self._config(self.base + "/echo", max_tokens=0), [], [])]
+        self.assertTrue(events)
+        self.assertNotIn("max_tokens", self.last_body)
+
+    async def test_summary_uses_shared_completion_without_hidden_cap(self):
+        from unittest.mock import AsyncMock, patch
+        complete = AsyncMock(return_value="summary")
+        with patch.object(providers, "complete", complete):
+            self.assertEqual(await providers.summarize({"max_tokens": 5000}, "history"), "summary")
+        self.assertEqual(complete.call_args.args[0]["max_tokens"], 5000)
+
+    def test_required_provider_limit_has_clear_error(self):
+        with self.assertRaisesRegex(ValueError, "requires an output token limit"):
+            providers._output_token_options({"max_tokens": 0}, required=True)
 
     async def test_openai_in_stream_error_is_not_silent_success(self):
         events = [event async for event in providers._openai_chat(self._config(f"{self.base}/stream-error"), [], [])]

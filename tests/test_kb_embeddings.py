@@ -38,16 +38,20 @@ class EmbeddingTest(unittest.TestCase):
         self.conn.commit()
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0], 0)
 
-    def test_existing_database_vectors_invalidated_only_once(self):
+    def test_legacy_database_is_adopted_without_wiping_vectors(self):
+        # A pre-versioning database has no schema_version; it is adopted in place.
+        self.conn.execute("DELETE FROM meta WHERE key='schema_version'")
         self.insert(1, [1, 0])
-        self.conn.execute("DELETE FROM meta WHERE key='embeddings_cleanup_v1'")
-        self.conn.commit()
-        kb._init(self.conn)
-        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0], 0)
-        self.conn.execute("INSERT INTO embeddings VALUES (1, 2, ?)", (np.array([0, 1], dtype="float32").tobytes(),))
-        self.conn.commit()
         kb._init(self.conn)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0], 1)
+
+    def test_version_mismatch_rebuilds_and_wipes_vectors(self):
+        self.insert(1, [1, 0])
+        self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', '999')")
+        self.conn.commit()
+        kb._init(self.conn)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0], 0)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0], 0)
 
     def test_same_count_vector_replacement_refreshes_cache(self):
         self.insert(1, [1, 0])

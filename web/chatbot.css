@@ -427,6 +427,37 @@
   cursor: default;
 }
 
+#ccb-root .ccb-busy-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px 12px;
+  color: var(--ccb-text);
+  font-size: 12px;
+}
+
+#ccb-root .ccb-busy-indicator[hidden] {
+  display: none;
+}
+
+#ccb-root .ccb-busy-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: ccb-busy-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes ccb-busy-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #ccb-root .ccb-busy-dot { animation: none; }
+}
+
 #ccb-root .ccb-typing::after {
   content: "▋";
   animation: ccb-blink 1s steps(2) infinite;

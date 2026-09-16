@@ -8,7 +8,7 @@ from typing import Any, Mapping
 from aiohttp import web
 from server import PromptServer
 
-from . import console, debug, kb, memory, providers, websearch
+from . import console, debug, enrich, kb, knowledge, memory, providers, websearch
 from .config_store import CONFIG_STORE
 
 routes = PromptServer.instance.routes
@@ -211,7 +211,52 @@ async def web_search(request: web.Request) -> web.Response:
 
 @routes.get("/chatbot/kb/status")
 async def kb_status(_request: web.Request) -> web.Response:
-    return web.json_response({"status": kb.status()})
+    try:
+        known = await asyncio.to_thread(knowledge.status)
+    except Exception as exc:
+        known = {"error": str(exc)}
+    try:
+        enrichment = await asyncio.to_thread(enrich.status)
+    except Exception as exc:
+        enrichment = {"error": str(exc)}
+    return web.json_response({"status": kb.status(), "knowledge": known, "enrich": enrichment})
+
+
+@routes.post("/chatbot/kb/enrich")
+async def kb_enrich(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        payload = {}
+    limit = int(payload.get("limit") or 5)
+    web = payload.get("web") is not False
+    retried = 0
+    if payload.get("retry", True) is not False:
+        try:
+            retried = await asyncio.to_thread(enrich.requeue_skipped)
+        except Exception:
+            retried = 0
+    enrich.start_background(limit=limit, web=web)
+    return web.json_response({"status": kb.status(), "enrich": enrich.status(), "retried": retried})
+
+
+@routes.post("/chatbot/kb/research")
+async def kb_research(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    entity = str(payload.get("entity") or payload.get("pack") or "").strip()
+    if not entity:
+        return web.json_response({"error": "Missing entity."}, status=400)
+    if not entity.startswith(("pack:", "node:")):
+        entity = f"pack:{entity}"
+    web = payload.get("web") is not False
+    try:
+        result = await asyncio.to_thread(enrich.research_entity, entity, web)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response(result)
 
 
 @routes.post("/chatbot/kb/compact")
@@ -260,8 +305,14 @@ async def docs_search(request: web.Request) -> web.Response:
     source = payload.get("source") or None
     if source not in (None, "pack", "official", "node", "example", "registry", "model"):
         source = None
+    pack = str(payload.get("pack") or "").strip() or None
+    mode = str(payload.get("mode") or "").strip()
+    limit = int(payload.get("limit") or 6)
     try:
-        results = await asyncio.to_thread(kb.search, query, int(payload.get("limit") or 6), source)
+        if mode:
+            results = await asyncio.to_thread(kb.retrieve, mode, query, limit, source, pack)
+        else:
+            results = await asyncio.to_thread(kb.search, query, limit, source, pack)
         return web.json_response({"results": results})
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
@@ -281,6 +332,135 @@ async def docs_node(request: web.Request) -> web.Response:
         return web.json_response(result)
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
+
+
+@routes.post("/chatbot/kb/resolve")
+async def kb_resolve(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    text = str(payload.get("text") or payload.get("query") or "").strip()
+    if not text:
+        return web.json_response({"error": "Missing text."}, status=400)
+    try:
+        entity = await asyncio.to_thread(knowledge.resolve, text)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response({"resolved": bool(entity), "entity": entity, "query": text})
+
+
+@routes.post("/chatbot/kb/compatible")
+async def kb_compatible(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    model = str(payload.get("model") or payload.get("text") or "").strip()
+    if not model:
+        return web.json_response({"error": "Missing model."}, status=400)
+    task = str(payload.get("task") or "").strip()
+    nodes = payload.get("nodes") if isinstance(payload.get("nodes"), list) else None
+    try:
+        entity = await asyncio.to_thread(knowledge.resolve, model)
+        if not entity:
+            return web.json_response({"resolved": False, "query": model,
+                                      "reason": "Unknown target. Report unresolved; do not substitute."})
+        result = await asyncio.to_thread(knowledge.compatible_nodes, entity, task, nodes)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response({"resolved": True, **result})
+
+
+@routes.post("/chatbot/kb/context")
+async def kb_context(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    model = str(payload.get("model") or payload.get("text") or "").strip()
+    if not model:
+        return web.json_response({"error": "Missing model."}, status=400)
+    task = str(payload.get("task") or "").strip()
+    nodes = payload.get("nodes") if isinstance(payload.get("nodes"), list) else None
+    try:
+        result = await asyncio.to_thread(knowledge.get_build_context, model, task, nodes)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response(result)
+
+
+@routes.post("/chatbot/experience")
+async def experience(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    nodes = payload.get("nodes") if isinstance(payload.get("nodes"), list) else None
+    try:
+        result = await asyncio.to_thread(
+            knowledge.record_experience,
+            str(payload.get("outcome") or ""),
+            str(payload.get("model") or ""),
+            str(payload.get("task") or ""),
+            str(payload.get("error") or payload.get("error_sig") or ""),
+            nodes,
+            str(payload.get("pattern_id") or ""),
+            "runtime",
+            str(payload.get("config_hash") or ""),
+        )
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response(result)
+
+
+@routes.post("/chatbot/experience/recall")
+async def experience_recall(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    signature = str(payload.get("error") or payload.get("error_sig") or "")
+    try:
+        matches = await asyncio.to_thread(knowledge.recall_errors, signature, int(payload.get("limit") or 5))
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response({"matches": matches})
+
+
+@routes.post("/chatbot/kb/approve")
+async def kb_approve(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    pattern_id = str(payload.get("pattern_id") or "").strip()
+    if not pattern_id:
+        return web.json_response({"error": "Missing pattern_id."}, status=400)
+    try:
+        result = await asyncio.to_thread(knowledge.approve_pattern, pattern_id)
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response(result)
+
+
+@routes.post("/chatbot/kb/evidence")
+async def kb_evidence(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    entity = str(payload.get("entity") or "").strip()
+    claims = payload.get("claims") if isinstance(payload.get("claims"), list) else []
+    if not entity or not claims:
+        return web.json_response({"error": "Missing entity or claims."}, status=400)
+    try:
+        result = await asyncio.to_thread(knowledge.add_claims, entity, claims,
+                                         str(payload.get("source") or ""),
+                                         str(payload.get("trust") or "WEB_UNVERIFIED"))
+    except Exception as exc:
+        return web.json_response({"error": str(exc)}, status=500)
+    return web.json_response(result)
 
 
 @routes.get("/chatbot/memory")
@@ -368,6 +548,26 @@ async def debug_report(request: web.Request) -> web.Response:
 @routes.post("/chatbot/debug/clear")
 async def debug_clear(_request: web.Request) -> web.Response:
     await asyncio.to_thread(debug.clear)
+    return web.json_response({"ok": True})
+
+
+@routes.post("/chatbot/debug/event")
+async def debug_event(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    category = str(payload.get("category") or "client")[:40]
+    event = str(payload.get("event") or "")[:60]
+    level = str(payload.get("level") or "info")[:10]
+    raw = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    data: dict[str, Any] = {}
+    for key, value in list(raw.items())[:20]:
+        name = str(key)[:40]
+        if name in ("category", "event", "level"):
+            continue
+        data[name] = value if isinstance(value, (int, float, bool)) else str(value)[:300]
+    debug.log(category, event, level=level, **data)
     return web.json_response({"ok": True})
 
 
