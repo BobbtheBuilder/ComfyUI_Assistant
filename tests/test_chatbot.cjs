@@ -27,6 +27,154 @@ function responseFor(chunks) {
   return { reader, response: { ok: true, body: { getReader: () => reader } } };
 }
 
+test("workflow identity stays stable through lazy IDs and saving, and new tabs stay separate", () => {
+  const app = { workflowManager: { activeWorkflow: { isTemporary: true } } };
+  const make = (nonce) => load(["resolveWorkflowKey"], {
+    app, _workflowSessionKeys: new WeakMap(), _workflowSessionNonce: nonce, _workflowSessionSeq: 0,
+  });
+  const c = make("page-a");
+  const first = c.resolveWorkflowKey();
+  Object.assign(app.workflowManager.activeWorkflow, { activeState: { id: "later" }, path: "saved.json", isTemporary: false });
+  assert.equal(c.resolveWorkflowKey(), first);
+  app.workflowManager.activeWorkflow = { isTemporary: true };
+  assert.notEqual(c.resolveWorkflowKey(), first);
+  assert.notEqual(make("page-b").resolveWorkflowKey(), first);
+});
+
+test("switching tabs during streaming never aborts or changes the chat owner", async () => {
+  const controller = new AbortController();
+  const state = { busy: true, requestActive: true, sessionKey: "a", abortController: controller };
+  let active = "b";
+  const switched = [];
+  const { response } = responseFor([Buffer.from('{"type":"text","text":"one"}\n'), Buffer.from('{"type":"text","text":"two"}\n')]);
+  const c = load(["streamChat", "onWorkflowMaybeChanged", "flushPendingSessionSwitch"], {
+    state, resolveWorkflowKey: () => active, api: { fetchApi: async () => response },
+    switchSession: async (key) => switched.push(key),
+  });
+  const result = await c.streamChat([], [], () => c.onWorkflowMaybeChanged(), controller.signal);
+  assert.equal(result.text, "onetwo");
+  assert.equal(state.sessionKey, "a");
+  assert.equal(controller.signal.aborted, false);
+  assert.equal(state.pendingSessionKey, "b");
+  active = "a";
+  c.onWorkflowMaybeChanged();
+  assert.equal(state.pendingSessionKey, null);
+  state.busy = false;
+  await c.flushPendingSessionSwitch();
+  assert.equal(switched.length, 0, "repair/preparation lifecycle still owns the chat");
+  state.requestActive = false;
+  await c.flushPendingSessionSwitch();
+  assert.deepEqual(switched, ["a"]);
+});
+
+test("late history responses cannot overwrite the new workflow", async () => {
+  const state = { sessionKey: "a", messages: [] };
+  const requests = new Map();
+  const c = load(["loadHistory"], {
+    state, renderHistory: () => {}, updateContextStatus: () => {},
+    api: { fetchApi: (url) => new Promise((resolve) => requests.set(url.split("=")[1], resolve)) },
+  });
+  const a = c.loadHistory();
+  state.sessionKey = "b";
+  const b = c.loadHistory();
+  await Promise.resolve();
+  requests.get("b")({ json: async () => ({ history: [{ content: "B" }] }) });
+  await b;
+  requests.get("a")({ json: async () => ({ history: [{ content: "A" }] }) });
+  await a;
+  assert.equal(state.messages[0].content, "B");
+  assert.equal(state.historyLoading, false);
+});
+
+test("history saves serialize snapshots so clearing cannot resurrect old messages", async () => {
+  const state = { sessionKey: "a", messages: [{ role: "user", content: "old" }] };
+  const requests = [];
+  const c = load(["saveHistory"], {
+    state, api: { fetchApi: (_url, options) => new Promise((resolve) => requests.push({ body: JSON.parse(options.body), resolve })) },
+  });
+  const old = c.saveHistory();
+  state.messages = [];
+  const cleared = c.saveHistory();
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].body.messages[0].content, "old");
+  requests[0].resolve({});
+  await old;
+  await new Promise(setImmediate);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1].body.messages, []);
+  requests[1].resolve({});
+  await cleared;
+});
+
+test("rapid idle switches save the old owner before changing sessions", async () => {
+  const state = { sessionKey: "a", messages: [{ content: "A" }], attachments: [] };
+  const saves = [];
+  let finish;
+  const c = load(["switchSession"], {
+    state, debugLog: () => {}, hashKey: (x) => x, renderAttachments: () => {}, renderHistory: () => {},
+    appendNotice: () => {}, scrollMessages: () => {}, loadHistory: async () => { state.historyLoading = true; },
+    saveHistory: (key) => { saves.push([key, state.messages[0]?.content]); return new Promise((r) => { finish = r; }); },
+  });
+  const b = c.switchSession("b");
+  const d = c.switchSession("d");
+  finish();
+  await Promise.all([b, d]);
+  assert.deepEqual(saves, [["a", "A"]]);
+  assert.equal(state.sessionKey, "d");
+});
+
+test("wrong-canvas tools and snapshot restoration are blocked without aborting", async () => {
+  const state = { runWorkflowKey: "original", abortController: new AbortController() };
+  const c = load(["assertRunWorkflow", "executeTool", "withGraphChange", "loadGraphSnapshot"], {
+    state, resolveWorkflowKey: () => "new", app: { graph: {} }, searchDocs: async () => ({ ok: true }),
+  });
+  await assert.rejects(c.executeTool("get_workflow_summary", {}), /original workflow/);
+  assert.throws(() => c.withGraphChange(() => assert.fail("must not mutate")), /original workflow/);
+  await assert.rejects(c.loadGraphSnapshot({ nodes: [] }), /original workflow/);
+  assert.equal((await c.executeTool("search_docs", {})).ok, true);
+  assert.equal(state.abortController.signal.aborted, false);
+});
+
+test("manual graph changes block stale edits, while moving nodes remains allowed", async () => {
+  const node = { id: 1, type: "Example", pos: [0, 0], widgets: [{ value: "original" }] };
+  const state = {};
+  const c = load(["graphContentStamp", "withGraphChange", "executeTool"], {
+    state, safeStringify: JSON.stringify, workflowSummary: () => ({}),
+    app: { graph: { _nodes: [node], beforeChange() {}, afterChange() {}, setDirtyCanvas() {} } },
+  });
+  state.runGraphSnapshot = c.graphContentStamp();
+  node.pos = [500, 600];
+  c.withGraphChange(() => { node.widgets[0].value = "assistant"; });
+  node.widgets[0].value = "user";
+  assert.throws(() => c.withGraphChange(() => assert.fail()), /content changed/);
+  await c.executeTool("get_workflow_summary", {});
+  c.withGraphChange(() => { node.widgets[0].value = "fresh"; });
+});
+
+test("new chat and automatic unload respect the whole request lifecycle", async () => {
+  const state = { requestActive: true, busy: false, messages: [{ content: "running" }] };
+  const c = load(["startNewChat", "unloadLlm"], { state, appendNotice: () => {} });
+  c.startNewChat();
+  assert.equal(state.messages[0].content, "running");
+  assert.equal((await c.unloadLlm(true)).skipped, true);
+});
+
+test("search_docs exposes every knowledge-base source", () => {
+  const start = source.indexOf("const TOOLS = [");
+  assert.notEqual(start, -1, "Missing TOOLS");
+  const end = source.indexOf("\n];", start);
+  assert.notEqual(end, -1, "Missing end of TOOLS");
+  const context = vm.createContext({});
+  vm.runInContext(source.slice(start, end + 3) + "\nglobalThis.__tools = TOOLS;", context);
+  const tool = context.__tools.find((entry) => entry.function.name === "search_docs");
+  assert.ok(tool, "Missing search_docs tool");
+  assert.deepEqual(
+    Array.from(tool.function.parameters.properties.source.enum),
+    ["pack", "node", "official", "example", "registry", "model"],
+  );
+});
+
 test("shared stream parser handles split UTF-8 and final line without newline", async () => {
   const bytes = Buffer.from('{"type":"text","text":"café"}\n{"type":"tool_call","name":"test"}');
   const split = bytes.indexOf(Buffer.from("é")) + 1;
@@ -80,7 +228,7 @@ test("cancelled task never executes returned tool calls", async () => {
   let calls = 0;
   const state = { config: {}, workflowTestCancel: false, testAbortController: new AbortController() };
   const c = load(["runTaskAgent"], {
-    state, RUNTIME_RULES: "", MAX_AGENT_TURNS: 2, TOOLS: [],
+    state, RUNTIME_RULES: "", TOOLS: [],
     refreshRelevantLessons: async () => {}, lessonsContext: () => "",
     streamChat: async (_messages, _tools, _callback, signal) => {
       assert.equal(signal, state.testAbortController.signal);
@@ -97,6 +245,7 @@ test("cancelled suite restores workflow without asking for another verdict", asy
   let restored = false;
   let judged = false;
   const c = load(["startWorkflowTestSuite"], {
+    resolveWorkflowKey: () => "test", flushPendingSessionSwitch: async () => {},
     state, WORKFLOW_MODIFICATIONS: [], setTestBusy: () => {}, selectTab: () => {},
     snapshotGraph: () => ({ original: true }), clearGraph: async () => {}, appendNotice: () => {},
     appendTestRow: () => ({ remove() {} }), askBuildTarget: async () => "test",
@@ -220,7 +369,7 @@ test("normal agent uses concurrent lookups and keeps tool messages ordered", asy
   let turn = 0;
   const calls = ["search_docs", "get_node_docs"].map((name, id) => ({ name, id: String(id), arguments: "{}" }));
   const c = load(["isLookupTool", "runToolBatch", "runAgent", "runTool", "recordToolResult"], {
-    state, MAX_AGENT_TURNS: 3, setBusy: () => {}, flushInjections: () => false,
+    state, setBusy: () => {}, flushInjections: () => false,
     streamAssistantReply: async () => turn++ ? { text: "done", toolCalls: [] } : { text: "", toolCalls: calls },
     toOpenAiToolCall: call => call, safeParse: JSON.parse, safeStringify: JSON.stringify,
     appendNotice: () => ({}), debugLog: () => {}, truncate: text => text,
@@ -245,7 +394,7 @@ test("workflow task agent overlaps lookups and records results in call order", a
   let recorded;
   const calls = ["search_docs", "get_node_docs"].map((name, id) => ({ name, id: String(id), arguments: "{}" }));
   const c = load(["isLookupTool", "runToolBatch", "runTaskAgent"], {
-    state: { config: {}, workflowTestCancel: false }, RUNTIME_RULES: "", MAX_AGENT_TURNS: 3, TOOLS: [],
+    state: { config: {}, workflowTestCancel: false }, RUNTIME_RULES: "", TOOLS: [],
     refreshRelevantLessons: async () => {}, lessonsContext: () => "", toOpenAiToolCall: call => call,
     streamChat: async messages => {
       if (!turn++) return { text: "", toolCalls: calls };
@@ -271,7 +420,7 @@ test("inline tool actions also use ordered concurrent lookups", async () => {
   const state = { messages: [], runId: 0 };
   let turn = 0;
   const c = load(["isLookupTool", "runToolBatch", "runAgent", "recordToolResult"], {
-    state, MAX_AGENT_TURNS: 3, setBusy: () => {}, flushInjections: () => false,
+    state, setBusy: () => {}, flushInjections: () => false,
     streamAssistantReply: async () => ({ text: turn++ ? "done" : "actions", toolCalls: [] }),
     extractInlineActions: text => text === "actions" ? [{ name: "search_docs", arguments: { query: "a" } },
       { name: "get_node_docs", arguments: { type: "b" } }] : [],

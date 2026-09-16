@@ -193,7 +193,7 @@ messages show with a `↪` marker. To stop entirely, use **Cancel**.
 | API key | empty | Stored server-side; never sent to the browser. |
 | Model | empty | Selected from the provider's model list. |
 | Temperature | 0.7 | Sampling temperature. |
-| Max tokens | 2048 | Max completion tokens per reply. |
+| Max tokens | 0 (auto) | Max completion tokens per reply. `0` = half the model's detected context window; omitted when the window is unknown so the provider decides. |
 | Native tool calling | On | Off = model emits fenced JSON actions (for tool-less models). |
 | Unload the LLM when I run a workflow | On | Unload local model instances when a workflow starts (LM Studio / Ollama). |
 | Let the assistant read the ComfyUI console | On | Exposes `get_console_log` so the model can read recent server console output on request. |
@@ -316,6 +316,21 @@ Bug reports, provider test results, and feature ideas are welcome:
 https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 ## Changelog
+
+### 0.4.4
+
+- Removed the fixed 25-step agent turn cap; the assistant keeps working until the task is done
+  or you cancel.
+- Output tokens now default to **auto**: half the model's detected context window (LM Studio /
+  Ollama / Anthropic), or your manual **Context window** override. If the window can't be
+  detected (OpenAI-compatible), the cap is omitted so the provider decides. Set **Max tokens** to
+  a positive number to force an explicit limit. Context compaction uses the same budget.
+- `search_docs` can now filter every knowledge-base source (example workflows, the pack registry,
+  and the model list) instead of only pack/official/node docs.
+- The knowledge base no longer re-indexes on every ComfyUI restart. It stores a fingerprint of the
+  installed nodes, the Manager files and your KB settings, and skips the rebuild when nothing
+  changed (official docs still refresh on their own schedule). **Settings → Knowledge base →
+  Rebuild** still forces a full rebuild.
 
 ### 0.4.3
 

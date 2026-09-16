@@ -214,13 +214,18 @@ const TOOLS = [
     function: {
       name: "search_docs",
       description:
-        "Search the local knowledge base of installed custom-node documentation and the official ComfyUI docs. Use this to learn what nodes do and how to use them.",
+        "Search the local knowledge base: installed custom-node docs, the official ComfyUI docs, bundled example workflows, the custom-node/manager registry (pack descriptions, node-to-pack map, model list), and full node schemas. Use this to learn what nodes do and how to use them.",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string", description: "Keywords, node name, or question" },
           limit: { type: "integer", description: "Max results, default 6" },
-          source: { type: "string", enum: ["pack", "official", "node"], description: "Optional source filter" },
+          source: {
+            type: "string",
+            enum: ["pack", "node", "official", "example", "registry", "model"],
+            description:
+              "Optional source filter: pack or node docs, official docs, example workflows, the pack registry, or the model list.",
+          },
         },
         required: ["query"],
       },
@@ -501,8 +506,8 @@ function buildUi() {
                 <input id="ccb-temperature" type="number" step="0.1" min="0" max="2" />
               </div>
               <div class="ccb-field">
-                <label>Max tokens</label>
-                <input id="ccb-max-tokens" type="number" step="128" min="128" />
+                <label>Max tokens (0 = half context window)</label>
+                <input id="ccb-max-tokens" type="number" step="128" min="0" />
               </div>
             </div>
             <div class="ccb-field">
@@ -1078,6 +1083,10 @@ async function searchInstalledNodes(query, limit = 25) {
 }
 
 function withGraphChange(mutate) {
+  if (state.runWorkflowKey) assertRunWorkflow();
+  if (state.runGraphSnapshot != null && graphContentStamp() !== state.runGraphSnapshot) {
+    throw new Error("Workflow content changed while planning. Read get_workflow_summary again before editing.");
+  }
   const graph = app.graph;
   const tracker = app.workflowManager?.activeWorkflow?.changeTracker;
   if (tracker?.beforeChange) tracker.beforeChange();
@@ -1088,6 +1097,7 @@ function withGraphChange(mutate) {
     if (tracker?.afterChange) tracker.afterChange();
     else graph.afterChange?.();
     graph.setDirtyCanvas(true, true);
+    if (state.runGraphSnapshot != null) state.runGraphSnapshot = graphContentStamp();
   }
 }
 
@@ -1195,7 +1205,6 @@ function disconnectLink(linkId, wrap = true) {
 }
 
 const MAX_WIDGET_CHARS = 100000;
-const MAX_AGENT_TURNS = 25;
 
 function widgetValueError(value) {
   if (typeof value !== "string") return "";
@@ -1539,6 +1548,7 @@ function layoutWorkflow(scope = "added") {
 
 async function validateWorkflow() {
   const defs = await getNodeDefs();
+  if (state.runWorkflowKey) assertRunWorkflow();
   const graph = app.graph;
   const unconnected = [];
   const dangling = [];
@@ -1988,8 +1998,11 @@ function suggestNodePack(repoUrl, name) {
 }
 
 async function executeTool(name, args) {
+  const canvasTools = ["get_workflow_summary", "get_node_details", "add_node", "remove_node", "connect_nodes", "disconnect_link", "set_widget_value", "move_node", "apply_workflow_edits", "list_prompt_nodes", "set_prompt", "get_selection", "highlight_nodes", "layout_workflow", "validate_workflow"];
+  if (state.runWorkflowKey && canvasTools.includes(name)) assertRunWorkflow();
   switch (name) {
     case "get_workflow_summary":
+      if (state.runGraphSnapshot != null) state.runGraphSnapshot = graphContentStamp();
       return workflowSummary();
     case "get_node_details":
       return nodeDetails(args.id);
@@ -2045,7 +2058,8 @@ async function executeTool(name, args) {
 
 async function submitInput() {
   const text = state.dom.input.value.trim();
-  if (!text || state.busy) return;
+  if (!text || state.busy || state.requestActive || state.historyLoading) return;
+  if (state.llmUnloading) { appendNotice("Wait for model unloading to finish, then send again."); return; }
   const command = text.toLowerCase();
   const testsActive = state.workflowTestRunning || state.pendingWorkflowTests || Boolean(state.buildTargetResolver);
 
@@ -2079,43 +2093,60 @@ async function submitInput() {
     return;
   }
 
-  state.dom.input.value = "";
-  state.dom.input.style.height = "auto";
+  const activeKey = resolveWorkflowKey();
+  if (activeKey && activeKey !== state.sessionKey) { await switchSession(activeKey); return; }
+  state.requestActive = true;
+  state.cancelled = false;
+  state.runWorkflowKey = activeKey;
+  state.runSelectionContext = selectionContext();
+  state.runGraphSnapshot = graphContentStamp();
+  try {
+    state.dom.input.value = "";
+    state.dom.input.style.height = "auto";
 
-  const config = state.config?.images || {};
-  const manual = state.attachments.map((attachment) => attachment.dataUrl);
-  const images = [...manual];
-  if (state.visionSupported !== false) {
-    let auto = [];
-    if (!manual.length) {
-      if (config.always_output || config.always_inputs) {
-        auto = await gatherAutoImages();
-      } else if (config.auto_on_mention !== false && IMAGE_MENTION_RE.test(text)) {
-        auto = await gatherMentionedImages(text);
-        if (auto.length) appendNotice(`Attached ${auto.length} workflow image(s) automatically.`);
+    const config = state.config?.images || {};
+    const manual = state.attachments.map((attachment) => attachment.dataUrl);
+    const images = [...manual];
+    if (state.visionSupported !== false) {
+      let auto = [];
+      if (!manual.length) {
+        if (config.always_output || config.always_inputs) {
+          auto = await gatherAutoImages();
+        } else if (config.auto_on_mention !== false && IMAGE_MENTION_RE.test(text)) {
+          auto = await gatherMentionedImages(text);
+          if (auto.length) appendNotice(`Attached ${auto.length} workflow image(s) automatically.`);
+        }
       }
+      for (const url of auto) {
+        if (!images.includes(url)) images.push(url);
+      }
+    } else if (manual.length || config.always_output || config.always_inputs || IMAGE_MENTION_RE.test(text)) {
+      appendNotice("Images not sent: the selected model does not support vision.");
     }
-    for (const url of auto) {
-      if (!images.includes(url)) images.push(url);
-    }
-  } else if (manual.length || config.always_output || config.always_inputs || IMAGE_MENTION_RE.test(text)) {
-    appendNotice("Images not sent: the selected model does not support vision.");
-  }
 
-  const displayText = images.length ? `${text}\n[${images.length} image(s) attached]` : text;
-  appendBubble("user", displayText);
-  state.messages.push({ role: "user", content: text, images });
-  state.attachments = [];
-  renderAttachments();
-  scrollMessages();
-  state.runAddedNodeIds = [];
-  state.runMutatedGraph = false;
-  state.runArranged = false;
-  state.fixPasses = 0;
-  state.correctionHint = state.config?.memory?.auto_detect !== false && CORRECTION_RE.test(text);
-  await refreshRelevantLessons(text);
-  await prepareContext();
-  runAgentWithFixups();
+    const displayText = images.length ? `${text}\n[${images.length} image(s) attached]` : text;
+    appendBubble("user", displayText);
+    state.messages.push({ role: "user", content: text, images });
+    state.attachments = [];
+    renderAttachments();
+    scrollMessages();
+    state.runAddedNodeIds = [];
+    state.runMutatedGraph = false;
+    state.runArranged = false;
+    state.fixPasses = 0;
+    state.correctionHint = state.config?.memory?.auto_detect !== false && CORRECTION_RE.test(text);
+    await refreshRelevantLessons(text);
+    await prepareContext();
+    if (!state.cancelled) await runAgentWithFixups();
+  } catch (error) {
+    appendBubble("error", String(error?.message || error));
+  } finally {
+    await saveHistory();
+    state.requestActive = false;
+    state.runWorkflowKey = null;
+    state.runGraphSnapshot = null;
+    await flushPendingSessionSwitch();
+  }
 }
 
 function setBusy(busy) {
@@ -2164,6 +2195,10 @@ function appendSteer(text) {
 }
 
 function injectInstruction(rawText) {
+  if (state.runWorkflowKey && resolveWorkflowKey() !== state.runWorkflowKey) {
+    appendNotice("Return to the original workflow to add instructions to this running chat.");
+    return;
+  }
   const text = String(rawText || "").trim();
   if (!text) return;
   if (state.pendingCard) state.pendingCard(false);
@@ -2190,13 +2225,8 @@ async function runAgent() {
   state.runArranged = false;
   setBusy(true);
   try {
-    let turns = 0;
     while (true) {
       if (state.cancelled || state.runId !== runId) return;
-      if ((turns += 1) > MAX_AGENT_TURNS) {
-        appendBubble("error", `Stopped after ${MAX_AGENT_TURNS} steps to avoid a loop. Send another message to continue.`);
-        break;
-      }
       flushInjections();
       const { text, toolCalls } = await streamAssistantReply();
       if (state.cancelled || state.runId !== runId) return;
@@ -2240,14 +2270,15 @@ async function runAgent() {
     if (state.runId === runId) {
       flushInjections();
       state.abortController = null;
-      setBusy(false);
       await saveHistory();
+      setBusy(false);
       scrollMessages();
     }
   }
 }
 
 function autoLayoutIfNeeded() {
+  if (state.runWorkflowKey) assertRunWorkflow();
   if (state.config?.layout?.auto_after_build === false) return;
   if (!state.runAddedNodeIds.length || state.runArranged) return;
   layoutWorkflow("added");
@@ -2391,7 +2422,7 @@ function selectionContext() {
 }
 
 function buildMessages() {
-  const context = selectionContext();
+  const context = state.requestActive ? state.runSelectionContext : selectionContext();
   const lessons = lessonsContext();
   const hint = state.correctionHint
     ? "The user's latest message sounds like a correction. If they are correcting a mistake, call remember_lesson with a short general rule before continuing."
@@ -2676,6 +2707,11 @@ function confirmDialog(title, detail, confirmLabel = "Confirm") {
 }
 
 function startNewChat() {
+  if (state.busy || state.requestActive || state.workflowTestRunning || state.historyLoading) {
+    appendNotice("Wait for the current request to finish before starting a new chat.");
+    return;
+  }
+  state.historyRevision = (state.historyRevision || 0) + 1;
   state.messages = [];
   state.dom.messages.innerHTML = "";
   state.dom.messages.dataset.welcomed = "1";
@@ -2702,7 +2738,7 @@ function populateSettings() {
   setPlaceholder("#ccb-api-key", config.api_key_configured ? "\u2022\u2022\u2022 configured" : "not set");
   setModelOptions(state.availableModels, config.model || "");
   setValue("#ccb-temperature", config.temperature ?? 0.7);
-  setValue("#ccb-max-tokens", config.max_tokens ?? 2048);
+  setValue("#ccb-max-tokens", config.max_tokens ?? 0);
   setValue("#ccb-native-tools", String(config.use_native_tools !== false));
   setValue("#ccb-unload-on-execute", String(config.unload?.on_execute !== false));
   setValue("#ccb-console-enabled", String(config.console?.enabled !== false));
@@ -2779,7 +2815,7 @@ function collectSettings() {
     base_url: get("#ccb-base-url"),
     model: get("#ccb-model"),
     temperature: Number(get("#ccb-temperature")) || 0,
-    max_tokens: Number(get("#ccb-max-tokens")) || 2048,
+    max_tokens: Number(get("#ccb-max-tokens")) || 0,
     use_native_tools: get("#ccb-native-tools") === "true",
     unload: {
       on_execute: get("#ccb-unload-on-execute") === "true",
@@ -2994,6 +3030,7 @@ function snapshotGraph() {
 
 async function loadGraphSnapshot(snapshot) {
   if (!snapshot) return;
+  if (state.runWorkflowKey) assertRunWorkflow();
   if (typeof app.loadGraphData === "function") {
     await app.loadGraphData(snapshot);
     return;
@@ -3094,7 +3131,7 @@ async function runTaskAgent(task, status) {
   const usedTools = [];
   let lastText = "";
   setStatus(`${task.label} \u2014 thinking\u2026`);
-  for (let turn = 0; turn < MAX_AGENT_TURNS; turn += 1) {
+  while (true) {
     if (state.workflowTestCancel) break;
     let liveText = "";
     const { text, toolCalls } = await streamChat(messages, TOOLS, (event) => {
@@ -3189,9 +3226,10 @@ async function beginWorkflowTests() {
 }
 
 async function startWorkflowTestSuite() {
-  if (state.workflowTestRunning) return;
+  if (state.workflowTestRunning || state.busy || state.requestActive || state.llmUnloading) return;
   state.pendingWorkflowTests = false;
   state.workflowTestRunning = true;
+  state.runWorkflowKey = resolveWorkflowKey();
   state.workflowTestCancel = false;
   state.testAbortController = new AbortController();
   setTestBusy(true);
@@ -3281,6 +3319,8 @@ async function startWorkflowTestSuite() {
       /* ignore restore errors */
     }
     state.workflowTestRunning = false;
+    state.runWorkflowKey = null;
+    await flushPendingSessionSwitch();
     state.workflowTestCancel = false;
     state.testAbortController = null;
     state.buildTargetResolver = null;
@@ -3416,23 +3456,18 @@ function setStatus(text) {
   state.dom.status.textContent = text;
 }
 const _workflowSessionKeys = new WeakMap();
+const _workflowSessionNonce = globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 let _workflowSessionSeq = 0;
 
 function resolveWorkflowKey() {
   const workflow = app.workflowManager?.activeWorkflow || app.extensionManager?.workflow?.activeWorkflow;
   if (!workflow || typeof workflow !== "object") return null;
+  if (_workflowSessionKeys.has(workflow)) return _workflowSessionKeys.get(workflow);
   const path = String(workflow.path ?? "").trim();
   const isTemporary = workflow.isTemporary === true || workflow.size === -1;
-  if (path && !isTemporary) return `path:${path}`;
-  // Untitled/temporary workflow: prefer its unique id, otherwise a key unique to this workflow
-  // object. This guarantees a brand-new workflow never inherits another workflow's chat.
-  const id = String(workflow.activeState?.id ?? "").trim();
-  if (id) return `id:${id}`;
-  if (!_workflowSessionKeys.has(workflow)) {
-    _workflowSessionSeq += 1;
-    _workflowSessionKeys.set(workflow, `tmp:${_workflowSessionSeq}`);
-  }
-  return _workflowSessionKeys.get(workflow);
+  const key = path && !isTemporary ? `path:${path}` : `tmp:${_workflowSessionNonce}:${++_workflowSessionSeq}`;
+  _workflowSessionKeys.set(workflow, key);
+  return key;
 }
 
 function renderHistory() {
@@ -3450,61 +3485,83 @@ function renderHistory() {
 async function loadHistory() {
   const key = state.sessionKey || resolveWorkflowKey() || "__default__";
   state.sessionKey = key;
+  const revision = state.historyRevision = (state.historyRevision || 0) + 1;
+  state.historyLoading = true;
+  let messages = [];
   try {
+    await state.historyWrites?.get(key);
     const response = await api.fetchApi(`/chatbot/history?key=${encodeURIComponent(key)}`);
     const payload = await response.json();
-    state.messages = Array.isArray(payload.history) ? payload.history : [];
-  } catch {
-    state.messages = [];
-  }
+    messages = Array.isArray(payload.history) ? payload.history : [];
+  } catch { /* keep this session empty on a failed read */ }
+  if (state.sessionKey !== key || state.historyRevision !== revision) return;
+  state.historyLoading = false;
+  state.messages = messages;
   renderHistory();
   updateContextStatus();
 }
 
 async function switchSession(newKey) {
-  if (!newKey || newKey === state.sessionKey) return;
-  debugLog("session", "switch", { key_hash: hashKey(newKey) });
-  const previousKey = state.sessionKey;
-  state.sessionKey = newKey;
-  if (state.busy) {
-    state.runId += 1;
-    state.cancelled = true;
-    if (state.pendingCard) state.pendingCard(false);
-    if (state.abortController) state.abortController.abort();
-    setBusy(false);
+  if (!newKey || newKey === state.sessionKey) {
+    state.pendingSessionKey = null;
+    return;
   }
-  await saveHistory(previousKey);
+  if (state.busy || state.requestActive || state.workflowTestRunning) {
+    state.pendingSessionKey = newKey;
+    return;
+  }
+  debugLog("session", "switch", { key_hash: hashKey(newKey) });
+  const saved = state.historyLoading ? Promise.resolve() : saveHistory(state.sessionKey);
+  state.sessionKey = newKey;
+  state.pendingSessionKey = null;
   state.messages = [];
   state.attachments = [];
+  state.botHighlightedIds = [];
   renderAttachments();
+  renderHistory();
   await loadHistory();
-  if (!state.messages.length) {
-    appendNotice("New chat session for this workflow.");
-  }
+  await saved;
+  if (state.sessionKey !== newKey) return;
+  if (!state.messages.length) appendNotice("New chat session for this workflow.");
   scrollMessages();
 }
 
-let workflowSwitchTimer = null;
+async function flushPendingSessionSwitch() {
+  if (state.busy || state.requestActive || state.workflowTestRunning) return;
+  state.pendingSessionKey = null;
+  const key = resolveWorkflowKey();
+  if (key) await switchSession(key);
+}
 
 function onWorkflowMaybeChanged() {
-  if (state.workflowTestRunning) return;
   const key = resolveWorkflowKey();
-  if (!key || key === state.sessionKey) return;
-  // Wait for the key to settle before switching, so transient identity changes or bursts of
-  // graphChanged events don't re-render the history or cancel the current run.
-  clearTimeout(workflowSwitchTimer);
-  workflowSwitchTimer = setTimeout(() => {
-    const confirmed = resolveWorkflowKey();
-    if (confirmed && confirmed !== state.sessionKey) switchSession(confirmed);
-  }, 600);
+  if (!key || key === state.sessionKey) { state.pendingSessionKey = null; return; }
+  if (state.busy || state.requestActive || state.workflowTestRunning) {
+    state.pendingSessionKey = key;
+    return;
+  }
+  void switchSession(key);
 }
 
 function startSessionWatcher() {
-  try {
-    api.addEventListener("graphChanged", onWorkflowMaybeChanged);
-  } catch {
-    /* graphChanged is emitted by modern frontends; the assistant's workflow keys require them anyway */
+  api.addEventListener("graphChanged", onWorkflowMaybeChanged);
+  setInterval(onWorkflowMaybeChanged, 300);
+}
+
+function assertRunWorkflow() {
+  if (state.runWorkflowKey && resolveWorkflowKey() !== state.runWorkflowKey) {
+    throw new Error("This request belongs to the original workflow. Return to that tab to continue edits; this canvas has not been changed.");
   }
+}
+
+function graphContentStamp() {
+  // Pan, zoom, selection and node positions are not execution changes.
+  return safeStringify((app.graph?._nodes || []).map((node) => ({
+    id: node.id, type: node.type, mode: node.mode,
+    widgets: (node.widgets || []).map((widget) => widget.value),
+    inputs: (node.inputs || []).map((input) => [input.name, input.type, input.link]),
+    outputs: (node.outputs || []).map((output) => [output.name, output.type, output.links]),
+  })), Infinity);
 }
 
 function setupCanvasCoexistence() {
@@ -3529,20 +3586,24 @@ async function saveHistory(keyOverride) {
     const copy = { role: message.role, content: message.content };
     if (message.tool_calls) copy.tool_calls = message.tool_calls;
     if (message.tool_call_id) copy.tool_call_id = message.tool_call_id;
-    if (message.images?.length) copy.image_count = message.images.length;
+    if (message.images?.length || message.image_count) copy.image_count = message.images?.length || message.image_count;
     if (message.synthetic) copy.synthetic = true;
     if (message.steer) copy.steer = true;
     return copy;
   });
-  try {
-    await api.fetchApi("/chatbot/history", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key, messages }),
-    });
-  } catch {
-    /* history persistence is best-effort */
-  }
+  const body = JSON.stringify({ key, messages });
+  state.historyWrites ||= new Map();
+  const previous = state.historyWrites.get(key) || Promise.resolve();
+  const write = previous.catch(() => {}).then(async () => {
+    try {
+      await api.fetchApi("/chatbot/history", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body,
+      });
+    } catch { /* history persistence is best-effort */ }
+  });
+  state.historyWrites.set(key, write);
+  await write;
+  if (state.historyWrites.get(key) === write) state.historyWrites.delete(key);
 }
 
 function estimateTokens(text) {
@@ -3565,11 +3626,19 @@ function messagesTokens(messages) {
   return total;
 }
 
+function contextWindowTokens() {
+  // A manual override wins (matching the server), otherwise use the detected window.
+  const configured = Number(state.config?.context?.window) || 0;
+  return configured > 0 ? configured : Number(state.contextWindow) || 0;
+}
+
 function contextBudget() {
-  const window = Number(state.contextWindow || state.config?.context?.window || 0);
+  const window = contextWindowTokens();
   if (!window) return 0;
-  const maxTokens = Number(state.config?.max_tokens) || 2048;
-  const reserve = Math.min(maxTokens, Math.floor(window / 2));
+  // Auto max-tokens reserves half the window for the reply; an explicit setting wins but is
+  // still capped at half so the prompt always has room.
+  const configured = Number(state.config?.max_tokens) || 0;
+  const reserve = configured > 0 ? Math.min(configured, Math.floor(window / 2)) : Math.floor(window / 2);
   return Math.max(1000, window - reserve - 512);
 }
 
@@ -3577,7 +3646,7 @@ function updateContextStatus() {
   const element = state.dom.root?.querySelector("#ccb-context-status");
   if (!element) return;
   const used = messagesTokens(buildMessages());
-  const window = Number(state.contextWindow || state.config?.context?.window || 0);
+  const window = contextWindowTokens();
   const windowText = window ? `${Math.round(window / 1000)}k` : "unknown";
   element.textContent = `Context: ~${used.toLocaleString()} tokens used of ${windowText}`;
 }
@@ -3807,6 +3876,11 @@ function lessonsContext() {
 }
 
 async function unloadLlm(quiet = false) {
+  if (state.busy || state.requestActive || state.workflowTestRunning || state.llmUnloading) {
+    if (!quiet) appendNotice("Wait for the assistant to finish before unloading the model.");
+    return { skipped: true };
+  }
+  state.llmUnloading = true;
   try {
     const response = await api.fetchApi("/chatbot/unload", {
       method: "POST",
@@ -3826,6 +3900,8 @@ async function unloadLlm(quiet = false) {
   } catch (error) {
     if (!quiet) appendNotice(`Unload failed: ${error.message}`);
     return { error: error.message };
+  } finally {
+    state.llmUnloading = false;
   }
 }
 

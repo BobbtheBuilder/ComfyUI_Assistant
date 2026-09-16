@@ -14,12 +14,21 @@ except ImportError:
     from debug import debug_log as _debug_log
 
 ANTHROPIC_VERSION = "2023-06-01"
+ANTHROPIC_FALLBACK_MAX_TOKENS = 8192
 
 DATA_URL_RE = re.compile(r"^data:(?P<media>[^;,]+);base64,(?P<data>.*)$", re.S)
 
 
 def _base_url(config: Mapping[str, Any]) -> str:
     return str(config.get("base_url") or "").rstrip("/")
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
 
 
 def _timeout() -> aiohttp.ClientTimeout:
@@ -192,13 +201,17 @@ def _anthropic_messages(messages: list[Mapping[str, Any]]) -> tuple[str, list[di
 async def _openai_chat(
     config: Mapping[str, Any], messages: list[Mapping[str, Any]], tools: list[Mapping[str, Any]]
 ) -> AsyncIterator[dict[str, Any]]:
+    max_tokens = _positive_int(config.get("max_tokens"))
     body: dict[str, Any] = {
         "model": config.get("model"),
         "messages": messages,
         "stream": True,
         "temperature": config.get("temperature", 0.7),
-        "max_tokens": int(config.get("max_tokens", 2048)),
     }
+    # Auto mode resolves to half the model's context window; when the window is unknown the
+    # field is omitted so the provider applies its own default.
+    if max_tokens:
+        body["max_tokens"] = max_tokens
     if tools and config.get("use_native_tools", True):
         body["tools"] = tools
         body["tool_choice"] = "auto"
@@ -254,12 +267,15 @@ async def _anthropic_chat(
     config: Mapping[str, Any], messages: list[Mapping[str, Any]], tools: list[Mapping[str, Any]]
 ) -> AsyncIterator[dict[str, Any]]:
     system, anthropic_messages = _anthropic_messages(messages)
+    # Anthropic requires an explicit output limit. Auto mode resolves to half the context window;
+    # a direct call with no limit falls back to a sane default.
+    max_tokens = _positive_int(config.get("max_tokens")) or ANTHROPIC_FALLBACK_MAX_TOKENS
     body: dict[str, Any] = {
         "model": config.get("model"),
         "messages": anthropic_messages,
         "stream": True,
         "temperature": config.get("temperature", 0.7),
-        "max_tokens": int(config.get("max_tokens", 2048)),
+        "max_tokens": max_tokens,
     }
     if system:
         body["system"] = system
@@ -310,6 +326,11 @@ async def chat_events(
 ) -> AsyncIterator[dict[str, Any]]:
     started = time.time()
     first_text: float | None = None
+    if not config.get("model"):
+        yield {"type": "error", "error": "No model selected. Open settings and choose a model."}
+        return
+    max_tokens = await resolved_max_tokens(config)
+    config = {**config, "max_tokens": max_tokens}
     _debug_log(
         "provider",
         "chat.start",
@@ -319,11 +340,8 @@ async def chat_events(
         tools=len(tools),
         native_tools=config.get("use_native_tools", True),
         temperature=config.get("temperature"),
-        max_tokens=config.get("max_tokens"),
+        max_tokens=max_tokens,
     )
-    if not config.get("model"):
-        yield {"type": "error", "error": "No model selected. Open settings and choose a model."}
-        return
     if not config.get("use_native_tools", True) and tools:
         messages = _with_system_protocol(messages, tools)
 
@@ -454,12 +472,47 @@ async def context_window(config: Mapping[str, Any], model: str) -> int | None:
     return None
 
 
+_WINDOW_TTL_SECONDS = 300
+_window_cache: dict[tuple[Any, str, str], tuple[float, int | None]] = {}
+
+
+async def _cached_context_window(config: Mapping[str, Any], model: str) -> int | None:
+    key = (config.get("provider"), _base_url(config), str(model or ""))
+    now = time.time()
+    cached = _window_cache.get(key)
+    if cached and now - cached[0] < _WINDOW_TTL_SECONDS:
+        return cached[1]
+    try:
+        window = await context_window(config, model)
+    except Exception:
+        window = None
+    _window_cache[key] = (now, window)
+    return window
+
+
+async def resolved_max_tokens(config: Mapping[str, Any]) -> int | None:
+    """Output cap for a request: an explicit setting wins, otherwise half the context window.
+
+    Returns None when neither is known, so callers can omit the field and let the provider
+    apply its own default.
+    """
+    explicit = _positive_int(config.get("max_tokens"))
+    if explicit:
+        return explicit
+    context = config.get("context") or {}
+    window = _positive_int(context.get("window") if isinstance(context, Mapping) else 0)
+    if not window:
+        window = _positive_int(await _cached_context_window(config, str(config.get("model") or "")))
+    return window // 2 if window else None
+
+
 async def summarize(config: Mapping[str, Any], text: str) -> str:
     text = (text or "").strip()
     if not text:
         return ""
-    max_tokens = max(256, min(1200, int(config.get("max_tokens", 800) or 800)))
+    max_tokens = await resolved_max_tokens(config)
     if _is_anthropic(config):
+        max_tokens = max_tokens or ANTHROPIC_FALLBACK_MAX_TOKENS
         body = {
             "model": config.get("model"),
             "system": SUMMARY_SYSTEM,
@@ -481,10 +534,11 @@ async def summarize(config: Mapping[str, Any], text: str) -> str:
             {"role": "system", "content": SUMMARY_SYSTEM},
             {"role": "user", "content": text},
         ],
-        "max_tokens": max_tokens,
         "temperature": 0.3,
         "stream": False,
     }
+    if max_tokens:
+        body["max_tokens"] = max_tokens
     url = f"{_base_url(config)}/chat/completions"
     async with aiohttp.ClientSession(timeout=_timeout()) as session:
         async with session.post(url, headers=_headers(config), json=body) as response:

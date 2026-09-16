@@ -49,7 +49,7 @@ DEFAULTS: dict[str, Any] = {
     "api_key": "",
     "model": "",
     "temperature": 0.7,
-    "max_tokens": 2048,
+    "max_tokens": 0,
     "use_native_tools": True,
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "websearch": {

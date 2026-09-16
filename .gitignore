@@ -1,10 +1,9 @@
 chatbot_config.json
 chatbot_history.json
-kb_index.sqlite
-kb_index.sqlite-*
 kb_cache/
-assistant_memory.sqlite
-assistant_memory.sqlite-*
+# local databases (kb + memory + generated stores)
+*.sqlite
+*.sqlite-*
 debug.log
 debug.log*
 tests/report.json

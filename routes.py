@@ -232,7 +232,7 @@ async def kb_rebuild(request: web.Request) -> web.Response:
     config = _effective_config(payload).get("kb", {})
     auto_official = bool(payload.get("auto_official", config.get("auto_official", True)))
     refresh_days = int(payload.get("refresh_days", config.get("refresh_days", 7)))
-    kb.start_background(auto_official=auto_official, refresh_days=refresh_days, force_official=True)
+    kb.start_background(force=True, auto_official=auto_official, refresh_days=refresh_days, force_official=True)
     return web.json_response({"status": kb.status()})
 
 

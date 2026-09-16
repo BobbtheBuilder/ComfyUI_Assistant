@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import unittest
+from unittest.mock import AsyncMock, patch
 
 NODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if NODE_DIR not in sys.path:
@@ -224,6 +225,48 @@ class ConversionHelpersTest(unittest.TestCase):
     def test_base_url_trims_trailing_slash(self):
         self.assertEqual(providers._base_url({"base_url": "http://x/v1/"}), "http://x/v1")
         self.assertEqual(providers._api_root({"base_url": "http://x/v1"}), "http://x")
+
+
+class ResolvedMaxTokensTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        providers._window_cache.clear()
+
+    async def test_explicit_setting_wins_without_probing(self):
+        probe = AsyncMock(return_value=100000)
+        with patch.object(providers, "context_window", new=probe):
+            value = await providers.resolved_max_tokens({"max_tokens": 512, "provider": "openai"})
+        self.assertEqual(value, 512)
+        probe.assert_not_awaited()
+
+    async def test_configured_context_window_halves_without_probing(self):
+        probe = AsyncMock(return_value=None)
+        config = {"max_tokens": 0, "context": {"window": 40000}}
+        with patch.object(providers, "context_window", new=probe):
+            value = await providers.resolved_max_tokens(config)
+        self.assertEqual(value, 20000)
+        probe.assert_not_awaited()
+
+    async def test_detected_window_halves(self):
+        probe = AsyncMock(return_value=32768)
+        config = {"max_tokens": 0, "provider": "lmstudio", "base_url": "http://x/v1", "model": "m"}
+        with patch.object(providers, "context_window", new=probe):
+            value = await providers.resolved_max_tokens(config)
+        self.assertEqual(value, 16384)
+        probe.assert_awaited_once()
+
+    async def test_unknown_window_returns_none(self):
+        config = {"max_tokens": 0, "provider": "openai", "base_url": "http://x/v1", "model": "m"}
+        with patch.object(providers, "context_window", new=AsyncMock(return_value=None)):
+            value = await providers.resolved_max_tokens(config)
+        self.assertIsNone(value)
+
+    async def test_window_probe_is_cached(self):
+        probe = AsyncMock(return_value=20000)
+        config = {"max_tokens": 0, "provider": "lmstudio", "base_url": "http://x/v1", "model": "m"}
+        with patch.object(providers, "context_window", new=probe):
+            self.assertEqual(await providers.resolved_max_tokens(config), 10000)
+            self.assertEqual(await providers.resolved_max_tokens(config), 10000)
+        probe.assert_awaited_once()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -41,6 +42,10 @@ DOC_EXTENSIONS = (".md", ".mdx", ".txt")
 CHUNK_CHARS = 1200
 CHUNK_OVERLAP = 150
 MAX_FILE_BYTES = 2_000_000
+
+# Bump when the indexing logic changes so the next start rebuilds once instead of
+# skipping on a stale fingerprint.
+KB_BUILD_VERSION = 1
 
 EXAMPLE_DIR_NAMES = {"example_workflows", "example_workflow", "examples", "workflows"}
 README_URL = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
@@ -647,6 +652,43 @@ def _kb_config() -> dict[str, Any]:
         return {}
 
 
+def _stat_stamp(path: str) -> list[Any]:
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return [None, None]
+    return [stat.st_size, stat.st_mtime_ns]
+
+
+def _build_fingerprint() -> str:
+    """Cheap signature of everything the indexers depend on.
+
+    Used to skip a rebuild when nothing changed. Deliberately coarse: it reads the installed
+    node-type list, the Manager files' stats and the KB flags, not node sources or docs.
+    """
+    parts: dict[str, Any] = {"version": KB_BUILD_VERSION}
+    try:
+        mapping, _ = node_catalog.registry()
+        parts["node_types"] = sorted(str(name) for name in mapping)
+    except Exception:
+        parts["node_types"] = []
+    manager = _manager_dir()
+    parts["manager"] = {
+        name: _stat_stamp(os.path.join(manager, name))
+        for name in ("custom-node-list.json", "extension-node-map.json", "model-list.json")
+    }
+    kb_config = _kb_config()
+    embed = kb_config.get("embed", {}) or {}
+    parts["flags"] = {
+        "examples": bool(kb_config.get("examples", True)),
+        "registry": bool(kb_config.get("registry", True)),
+        "extended_official": bool(kb_config.get("extended_official", True)),
+        "embed_enabled": bool(embed.get("enabled", True)),
+        "embed_model": str(embed.get("model") or ""),
+    }
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
+
+
 def _embed_settings() -> tuple[dict[str, Any] | None, str]:
     try:
         try:
@@ -877,7 +919,7 @@ def compact(full: bool = True) -> dict[str, Any]:
     return {"before_mb": round(before / 1e6, 1), "after_mb": round(after / 1e6, 1), "freed_mb": round(freed / 1e6, 1)}
 
 
-def build(force_official: bool = False, auto_official: bool = True, refresh_days: int = 7, delay: float = 0) -> None:
+def build(force: bool = False, force_official: bool = False, auto_official: bool = True, refresh_days: int = 7, delay: float = 0) -> None:
     if delay:
         time.sleep(delay)
     with _lock:
@@ -886,13 +928,43 @@ def build(force_official: bool = False, auto_official: bool = True, refresh_days
         _state["building"] = True
         _state["error"] = ""
     started = time.time()
-    _debug_log("kb", "build.start", force_official=force_official, auto_official=auto_official)
+    _debug_log("kb", "build.start", force=force, force_official=force_official, auto_official=auto_official)
     try:
         conn = _connect()
         try:
             _init(conn)
         finally:
             conn.close()
+
+        # Skip the whole rebuild when nothing the indexers depend on has changed. Official docs
+        # still follow their own staleness timer.
+        fingerprint = _build_fingerprint()
+        stored = _meta_get("build_fingerprint")
+        if not force and fingerprint and stored == fingerprint:
+            fetched = False
+            if auto_official:
+                fetched_at = float(_meta_get("official_fetched_at") or 0)
+                stale = (time.time() - fetched_at) > max(1, refresh_days) * 86400
+                if force_official or not fetched_at or stale:
+                    try:
+                        fetched = fetch_official(force=True)
+                    except Exception as exc:
+                        _state["error"] = f"official docs: {exc}"
+            if fetched:
+                # A docs refresh replaced the official chunks, so their vectors are gone. Embed
+                # just those; everything else stays untouched.
+                try:
+                    index_embeddings()
+                except Exception as exc:
+                    _state["error"] = f"embeddings: {exc}"
+                _vectors_cache["count"] = -1
+            _refresh_counts()
+            _state["last_build"] = time.time()
+            _state["last_build_iso"] = _iso(_state["last_build"])
+            _set_progress("Ready")
+            _debug_log("kb", "build.skipped", fingerprint=fingerprint, error=_state.get("error") or None)
+            return
+
         index_local()
         index_node_schemas()
         kb_config = _kb_config()
@@ -927,6 +999,10 @@ def build(force_official: bool = False, auto_official: bool = True, refresh_days
                 compact(full=False)
         except Exception as exc:
             _debug_log("kb", "compact.error", level="warning", error=str(exc))
+        # Structural indexing completed, so record the fingerprint even if docs/embeddings hit
+        # a transient error (those are retried on their own schedule) — otherwise an offline
+        # machine would rebuild the whole index on every start.
+        _meta_set("build_fingerprint", fingerprint)
         _state["last_build"] = time.time()
         _state["last_build_iso"] = _iso(_state["last_build"])
         _set_progress("Ready")
@@ -949,6 +1025,7 @@ def build(force_official: bool = False, auto_official: bool = True, refresh_days
 
 
 def start_background(
+    force: bool = False,
     auto_official: bool = True,
     refresh_days: int = 7,
     force_official: bool = False,
@@ -957,6 +1034,7 @@ def start_background(
     thread = threading.Thread(
         target=build,
         kwargs={
+            "force": force,
             "force_official": force_official,
             "auto_official": auto_official,
             "refresh_days": refresh_days,
