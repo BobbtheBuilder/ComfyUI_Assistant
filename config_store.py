@@ -51,6 +51,9 @@ DEFAULTS: dict[str, Any] = {
     "temperature": 0.7,
     "max_tokens": 0,
     "use_native_tools": True,
+    "thinking": {
+        "enabled": True,
+    },
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "websearch": {
         "provider": "tavily",

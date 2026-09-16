@@ -2,4 +2,5 @@
 # .comfyignore layers on top of .gitignore (untracked files are already excluded).
 tests/
 graft/
+docs/
 screenshot.jpg

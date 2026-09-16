@@ -45,6 +45,12 @@ class ConfigStoreTest(unittest.TestCase):
                 self.store.update({"model": "unsaved"})
         self.assertEqual(self.store.resolved(), previous)
 
+    def test_thinking_defaults_on_and_toggles(self):
+        self.assertTrue(self.store.resolved()["thinking"]["enabled"])
+        snapshot = self.store.update({"thinking": {"enabled": False}})
+        self.assertFalse(snapshot["thinking"]["enabled"])
+        self.assertFalse(self.store.resolved()["thinking"]["enabled"])
+
     def test_update_does_not_keep_caller_owned_values(self):
         values = {"kb": {"embed": {"model": "original"}}}
         self.store.update(values)

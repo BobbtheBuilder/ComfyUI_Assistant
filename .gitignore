@@ -18,5 +18,8 @@ AGENTS.md
 opencode.json
 .ignore
 
+# local dev notes / agent docs - never published
+docs/
+
 # comfy node publish build artifact
 node.zip

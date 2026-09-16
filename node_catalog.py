@@ -4,12 +4,32 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import time
 from typing import Any
 
 
 def registry():
     import nodes
     return nodes.NODE_CLASS_MAPPINGS, getattr(nodes, "NODE_DISPLAY_NAME_MAPPINGS", {})
+
+
+def snapshot(attempts: int = 6, delay: float = 0.2) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Stable copies of the live node registries.
+
+    ComfyUI keeps inserting into ``NODE_CLASS_MAPPINGS`` while custom nodes load, and copying a
+    dict while it is mutated raises ``RuntimeError``. Retry briefly and hand back copies so
+    callers can iterate without racing the loader.
+    """
+    last_error: RuntimeError | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            mapping, names = registry()
+            return dict(mapping), dict(names)
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(delay)
+    raise last_error if last_error else RuntimeError("Node registry is unavailable.")
 
 
 def record(node_type: str) -> dict[str, Any]:

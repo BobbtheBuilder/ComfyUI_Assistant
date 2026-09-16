@@ -41,6 +41,125 @@ test("workflow identity stays stable through lazy IDs and saving, and new tabs s
   assert.notEqual(make("page-b").resolveWorkflowKey(), first);
 });
 
+test("modern workflow IDs survive restored objects, reloads, saving and renaming", () => {
+  const app = { extensionManager: { workflow: { activeWorkflow: {
+    path: "workflows/Unsaved Workflow.json", size: -1, isLoaded: true,
+    activeState: { id: "workflow-a" },
+  } } }, workflowManager: { activeWorkflow: { activeState: { id: "stale" } } } };
+  const make = (nonce) => load(["resolveWorkflowKey"], {
+    app, _workflowSessionKeys: new WeakMap(), _workflowSessionNonce: nonce, _workflowSessionSeq: 0,
+  });
+  const first = make("page-a").resolveWorkflowKey();
+  assert.equal(first, "id:workflow-a", "modern store takes priority");
+  app.extensionManager.workflow.activeWorkflow = {
+    path: "workflows/renamed.json", size: 42, isLoaded: true, activeState: { id: "workflow-a" },
+  };
+  assert.equal(make("page-b").resolveWorkflowKey(), first);
+  app.extensionManager.workflow.activeWorkflow = {
+    path: "workflows/Unsaved Workflow.json", size: -1, activeState: { id: "workflow-b" },
+  };
+  assert.notEqual(make("page-c").resolveWorkflowKey(), first, "reused tab name is not an identity");
+});
+
+test("loading workflows wait for identity and can use their own serialized content", () => {
+  const workflow = { isLoaded: false, size: -1 };
+  const app = { extensionManager: { workflow: { activeWorkflow: workflow } }, graph: { id: "previous-tab" } };
+  const c = load(["resolveWorkflowKey"], {
+    app, _workflowSessionKeys: new WeakMap(), _workflowSessionNonce: "page", _workflowSessionSeq: 0,
+  });
+  assert.equal(c.resolveWorkflowKey(), null);
+  workflow.content = JSON.stringify({ id: "correct-owner" });
+  assert.equal(c.resolveWorkflowKey(), "id:correct-owner");
+  workflow.activeState = { id: "changed-later" };
+  assert.equal(c.resolveWorkflowKey(), "id:correct-owner", "identity freezes for this object");
+});
+
+test("unassigned startup never reads or writes the shared default chat", async () => {
+  const state = { sessionKey: null, messages: [{ content: "unassigned" }] };
+  const c = load(["loadHistory", "saveHistory"], {
+    state, resolveWorkflowKey: () => null,
+    api: { fetchApi: () => assert.fail("No workflow means no history request") },
+  });
+  await c.loadHistory();
+  await c.saveHistory();
+  state.sessionKey = "__default__";
+  await c.saveHistory();
+});
+
+test("draft text and attachments return to their own workflow", async () => {
+  const image = { dataUrl: "test-image" };
+  const state = {
+    sessionKey: "a", messages: [], attachments: [image],
+    dom: { input: { value: "draft A", style: {} } },
+  };
+  const c = load(["switchSession"], {
+    state, debugLog: () => {}, hashKey: (x) => x, renderAttachments: () => {}, renderHistory: () => {},
+    appendNotice: () => {}, scrollMessages: () => {}, loadHistory: async () => {},
+    saveHistory: async () => {},
+  });
+  await c.switchSession("b");
+  assert.equal(state.dom.input.value, "");
+  assert.equal(state.attachments.length, 0);
+  state.dom.input.value = "draft B";
+  await c.switchSession("a");
+  assert.equal(state.dom.input.value, "draft A");
+  assert.equal(state.attachments[0], image);
+  await c.switchSession("b");
+  assert.equal(state.dom.input.value, "draft B");
+});
+
+test("New clicked before the watcher catches up cannot clear the previous workflow", async () => {
+  const state = { sessionKey: "a", messages: [{ content: "A" }] };
+  const switched = [];
+  const c = load(["startNewChat"], {
+    state, resolveWorkflowKey: () => "b", switchSession: async (key) => switched.push(key),
+  });
+  await c.startNewChat();
+  assert.deepEqual(switched, ["b"]);
+  assert.equal(state.messages[0].content, "A");
+});
+
+test("chat histories round-trip through A-B-A switches and a restored browser session", async () => {
+  const stored = new Map();
+  const api = { fetchApi: async (url, options) => {
+    if (options?.method === "POST") {
+      const { key, messages } = JSON.parse(options.body);
+      stored.set(key, messages);
+      return {};
+    }
+    const key = decodeURIComponent(url.split("=")[1]);
+    return { json: async () => ({ history: stored.get(key) || [] }) };
+  } };
+  const a = { size: -1, isLoaded: true, activeState: { id: "a" } };
+  const b = { size: -1, isLoaded: true, activeState: { id: "b" } };
+  const app = { extensionManager: { workflow: { activeWorkflow: a } } };
+  const make = (nonce) => {
+    const state = { messages: [], attachments: [], dom: { input: { value: "", style: {} } } };
+    const c = load(["resolveWorkflowKey", "loadHistory", "saveHistory", "switchSession"], {
+      app, api, state, _workflowSessionKeys: new WeakMap(), _workflowSessionNonce: nonce, _workflowSessionSeq: 0,
+      debugLog: () => {}, hashKey: (x) => x, renderAttachments: () => {}, renderHistory: () => {},
+      updateContextStatus: () => {}, appendNotice: () => {}, scrollMessages: () => {},
+    });
+    return { c, state };
+  };
+  const { c, state } = make("first-page");
+  await c.switchSession(c.resolveWorkflowKey());
+  state.messages.push({ role: "user", content: "belongs to A" });
+  app.extensionManager.workflow.activeWorkflow = b;
+  await c.switchSession(c.resolveWorkflowKey());
+  assert.equal(state.messages.length, 0);
+  state.messages.push({ role: "user", content: "belongs to B" });
+  app.extensionManager.workflow.activeWorkflow = a;
+  await c.switchSession(c.resolveWorkflowKey());
+  assert.equal(state.messages[0].content, "belongs to A");
+  // The browser restores another object with the same workflow ID, not the old WeakMap.
+  app.extensionManager.workflow.activeWorkflow = JSON.parse(JSON.stringify(b));
+  const restored = make("next-page");
+  await restored.c.loadHistory();
+  assert.equal(restored.state.messages[0].content, "belongs to B");
+  assert.equal(stored.has("__default__"), false);
+});
+
 test("switching tabs during streaming never aborts or changes the chat owner", async () => {
   const controller = new AbortController();
   const state = { busy: true, requestActive: true, sessionKey: "a", abortController: controller };
@@ -173,6 +292,19 @@ test("search_docs exposes every knowledge-base source", () => {
     Array.from(tool.function.parameters.properties.source.enum),
     ["pack", "node", "official", "example", "registry", "model"],
   );
+});
+
+test("streamChat forwards reasoning without polluting text", async () => {
+  const bytes = Buffer.from(
+    '{"type":"reasoning","text":"hmm"}\n{"type":"text","text":"Hi"}\n{"type":"reasoning","text":" ok"}\n',
+  );
+  const { response } = responseFor([bytes]);
+  const events = [];
+  const c = load(["streamChat"], { api: { fetchApi: async () => response } });
+  const result = await c.streamChat([], [], event => events.push(event));
+  assert.equal(result.text, "Hi");
+  assert.equal(result.reasoning, "hmm ok");
+  assert.deepEqual(events.map(event => event.type), ["reasoning", "text", "reasoning"]);
 });
 
 test("shared stream parser handles split UTF-8 and final line without newline", async () => {

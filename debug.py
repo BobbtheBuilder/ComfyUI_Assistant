@@ -180,6 +180,7 @@ def _config_summary() -> dict[str, Any]:
         "temperature": config.get("temperature"),
         "max_tokens": config.get("max_tokens"),
         "use_native_tools": config.get("use_native_tools"),
+        "thinking": config.get("thinking"),
         "websearch": {
             "provider": websearch.get("provider"),
             "has_key": bool(websearch.get("api_key")),

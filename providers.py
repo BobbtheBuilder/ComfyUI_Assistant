@@ -31,6 +31,13 @@ def _positive_int(value: Any) -> int:
     return number if number > 0 else 0
 
 
+def _thinking_enabled(config: Mapping[str, Any]) -> bool:
+    thinking = config.get("thinking")
+    if isinstance(thinking, Mapping):
+        return thinking.get("enabled", True) is not False
+    return True
+
+
 def _timeout() -> aiohttp.ClientTimeout:
     return aiohttp.ClientTimeout(total=None)
 
@@ -216,6 +223,7 @@ async def _openai_chat(
         body["tools"] = tools
         body["tool_choice"] = "auto"
     url = f"{_base_url(config)}/chat/completions"
+    thinking = _thinking_enabled(config)
     pending: dict[int, dict[str, str]] = {}
     finish_reason = None
     async with aiohttp.ClientSession(timeout=_timeout()) as session:
@@ -242,6 +250,10 @@ async def _openai_chat(
                     continue
                 choice = choices[0]
                 delta = choice.get("delta", {}) or {}
+                if thinking:
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                    if reasoning:
+                        yield {"type": "reasoning", "text": reasoning}
                 if delta.get("content"):
                     yield {"type": "text", "text": delta["content"]}
                 for call in delta.get("tool_calls") or []:
@@ -282,6 +294,7 @@ async def _anthropic_chat(
     if tools and config.get("use_native_tools", True):
         body["tools"] = _anthropic_tools(tools)
     url = f"{_base_url(config)}/v1/messages"
+    thinking = _thinking_enabled(config)
     current_tool: dict[str, Any] | None = None
     finish_reason = None
     async with aiohttp.ClientSession(timeout=_timeout()) as session:
@@ -307,6 +320,8 @@ async def _anthropic_chat(
                     delta = event.get("delta", {})
                     if delta.get("type") == "text_delta":
                         yield {"type": "text", "text": delta.get("text", "")}
+                    elif delta.get("type") == "thinking_delta" and thinking:
+                        yield {"type": "reasoning", "text": delta.get("thinking", "")}
                     elif delta.get("type") == "input_json_delta" and current_tool is not None:
                         current_tool["arguments"] += delta.get("partial_json", "")
                 elif event_type == "content_block_stop":
@@ -326,6 +341,7 @@ async def chat_events(
 ) -> AsyncIterator[dict[str, Any]]:
     started = time.time()
     first_text: float | None = None
+    first_reasoning: float | None = None
     if not config.get("model"):
         yield {"type": "error", "error": "No model selected. Open settings and choose a model."}
         return
@@ -346,14 +362,17 @@ async def chat_events(
         messages = _with_system_protocol(messages, tools)
 
     async def _relay() -> AsyncIterator[dict[str, Any]]:
-        nonlocal first_text
+        nonlocal first_text, first_reasoning
         if _is_anthropic(config):
             stream = _anthropic_chat(config, messages, tools)
         else:
             stream = _openai_chat(config, messages, tools)
         async for event in stream:
             kind = event.get("type")
-            if kind == "text" and first_text is None:
+            if kind == "reasoning" and first_reasoning is None:
+                first_reasoning = time.time()
+                _debug_log("provider", "chat.first_reasoning", ms=round((first_reasoning - started) * 1000))
+            elif kind == "text" and first_text is None:
                 first_text = time.time()
                 _debug_log("provider", "chat.first_token", ms=round((first_text - started) * 1000))
             elif kind == "done":

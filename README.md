@@ -195,6 +195,7 @@ messages show with a `↪` marker. To stop entirely, use **Cancel**.
 | Temperature | 0.7 | Sampling temperature. |
 | Max tokens | 0 (auto) | Max completion tokens per reply. `0` = half the model's detected context window; omitted when the window is unknown so the provider decides. |
 | Native tool calling | On | Off = model emits fenced JSON actions (for tool-less models). |
+| Show model thinking | On | Show the model's reasoning stream (`reasoning_content` / Anthropic thinking) as a collapsed block above its reply. |
 | Unload the LLM when I run a workflow | On | Unload local model instances when a workflow starts (LM Studio / Ollama). |
 | Let the assistant read the ComfyUI console | On | Exposes `get_console_log` so the model can read recent server console output on request. |
 | System prompt | built-in | Instruction preamble. Use **Reset to default** to restore the built-in prompt. |
@@ -317,6 +318,18 @@ https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 ## Changelog
 
+### 0.4.5
+
+- Fixed: the knowledge base no longer crashes on startup with
+  `dictionary changed size during iteration` — it indexes a stable snapshot of the node registry
+  instead of reading the live mapping while ComfyUI is still loading nodes.
+- Fixed: per-workflow chat ownership hardened — each workflow keeps its own session, there is no
+  shared default chat, and drafts plus history reads/writes stay with the owning workflow.
+- The model's **thinking** is now shown in the chat as a collapsed "Thinking…" block above each
+  reply (OpenAI-compatible `reasoning_content` and Anthropic thinking). It is saved with the
+  session (capped) but never sent back to the model. Toggle it in **Settings → Show model thinking**.
+- Local development `docs/` are kept out of the repository and the published node archive.
+
 ### 0.4.4
 
 - Removed the fixed 25-step agent turn cap; the assistant keeps working until the task is done
@@ -412,3 +425,10 @@ https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 - Initial release: floating chat panel, workflow read/edit tools, knowledge base, memory, vision,
   web search, custom node install, context compaction, and a privacy-first debug system.
+
+## Maintaining workflow chat ownership
+
+Before changing session handling, workflow switching, history persistence, or request
+lifecycle, read [Workflow chat ownership](docs/workflow-chat-ownership.md). It records
+the September 2026 fix, ownership rules, known history-recovery limits, and required
+regression checks. Preserve the existing LLM busy/typing indicator.

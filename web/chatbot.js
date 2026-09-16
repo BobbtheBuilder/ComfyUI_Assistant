@@ -518,6 +518,13 @@ function buildUi() {
               </select>
             </div>
             <div class="ccb-field">
+              <label>Show model thinking (collapsed reasoning)</label>
+              <select id="ccb-thinking-enabled">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+            <div class="ccb-field">
               <label>Unload the LLM when I run a workflow</label>
               <div class="ccb-row">
                 <div class="ccb-field">
@@ -1205,6 +1212,7 @@ function disconnectLink(linkId, wrap = true) {
 }
 
 const MAX_WIDGET_CHARS = 100000;
+const REASONING_MAX_CHARS = 20000;
 
 function widgetValueError(value) {
   if (typeof value !== "string") return "";
@@ -2094,6 +2102,7 @@ async function submitInput() {
   }
 
   const activeKey = resolveWorkflowKey();
+  if (!activeKey) { appendNotice("Wait for the workflow tab to finish loading before sending."); return; }
   if (activeKey && activeKey !== state.sessionKey) { await switchSession(activeKey); return; }
   state.requestActive = true;
   state.cancelled = false;
@@ -2228,20 +2237,20 @@ async function runAgent() {
     while (true) {
       if (state.cancelled || state.runId !== runId) return;
       flushInjections();
-      const { text, toolCalls } = await streamAssistantReply();
+      const { text, toolCalls, reasoning } = await streamAssistantReply();
       if (state.cancelled || state.runId !== runId) return;
       if (!toolCalls.length) {
         const inline = extractInlineActions(text);
         if (inline.length) {
-          state.messages.push({ role: "assistant", content: text });
+          state.messages.push({ role: "assistant", content: text, reasoning });
           await runToolBatch(inline,
             (call) => runTool(call.name, call.arguments),
             (call, result) => recordToolResult(call.name, result),
             () => state.cancelled || state.runId !== runId);
           continue;
         }
-        if (String(text || "").trim()) {
-          state.messages.push({ role: "assistant", content: text });
+        if (String(text || "").trim() || reasoning) {
+          state.messages.push({ role: "assistant", content: text, reasoning });
         }
         if (flushInjections()) continue;
         break;
@@ -2249,6 +2258,7 @@ async function runAgent() {
       state.messages.push({
         role: "assistant",
         content: text,
+        reasoning,
         tool_calls: toolCalls.map(toOpenAiToolCall),
       });
       await runToolBatch(toolCalls,
@@ -2386,21 +2396,45 @@ function recordToolResult(name, result, toolCallId) {
   }
 }
 
+function showThinking() {
+  return state.config?.thinking?.enabled !== false;
+}
+
+function appendReasoning(bubble = null) {
+  const box = el("details", { class: "ccb-reasoning" });
+  const summary = el("summary", { class: "ccb-reasoning-summary", text: "Thinking\u2026" });
+  const body = el("div", { class: "ccb-reasoning-body" });
+  box.appendChild(summary);
+  box.appendChild(body);
+  if (bubble) state.dom.messages.insertBefore(box, bubble);
+  else state.dom.messages.appendChild(box);
+  return { box, summary, body };
+}
+
 async function streamAssistantReply() {
   state.abortController = new AbortController();
   const bubble = appendBubble("assistant", "");
   bubble.classList.add("ccb-typing");
   let text = "";
+  let reasoning = "";
+  let reasoningView = null;
   try {
     const result = await streamChat(buildMessages(), TOOLS, (event) => {
       if (event.type === "text") {
         text += event.text;
         bubble.textContent = text;
         scrollMessages();
+      } else if (event.type === "reasoning" && showThinking()) {
+        reasoning += event.text;
+        if (!reasoningView) reasoningView = appendReasoning(bubble);
+        reasoningView.body.textContent = reasoning;
+        reasoningView.summary.textContent = `Thinking\u2026 (${reasoning.length.toLocaleString()} chars)`;
+        scrollMessages();
       }
     }, state.abortController.signal);
     if (!text && !result.toolCalls.length) bubble.remove();
-    return result;
+    if (reasoningView && !reasoning) reasoningView.box.remove();
+    return { text: result.text, toolCalls: result.toolCalls, reasoning };
   } catch (error) {
     if (!text) bubble.remove();
     if (error?.name !== "AbortError") debugLog("chat", "error", { error: error.message });
@@ -2465,6 +2499,7 @@ function buildMessages() {
       for (const url of message.images) content.push({ type: "image_url", image_url: { url } });
       return { role: "user", content };
     }
+    // Only these fields travel to the model; reasoning is intentionally omitted.
     const copy = { role: message.role, content: message.content };
     if (isLastUser && volatile && typeof message.content === "string") {
       copy.content = prefix(message.content);
@@ -2706,11 +2741,14 @@ function confirmDialog(title, detail, confirmLabel = "Confirm") {
   ]);
 }
 
-function startNewChat() {
+async function startNewChat() {
   if (state.busy || state.requestActive || state.workflowTestRunning || state.historyLoading) {
     appendNotice("Wait for the current request to finish before starting a new chat.");
     return;
   }
+  const activeKey = resolveWorkflowKey();
+  if (!activeKey) return;
+  if (activeKey !== state.sessionKey) { await switchSession(activeKey); return; }
   state.historyRevision = (state.historyRevision || 0) + 1;
   state.messages = [];
   state.dom.messages.innerHTML = "";
@@ -2740,6 +2778,7 @@ function populateSettings() {
   setValue("#ccb-temperature", config.temperature ?? 0.7);
   setValue("#ccb-max-tokens", config.max_tokens ?? 0);
   setValue("#ccb-native-tools", String(config.use_native_tools !== false));
+  setValue("#ccb-thinking-enabled", String(config.thinking?.enabled !== false));
   setValue("#ccb-unload-on-execute", String(config.unload?.on_execute !== false));
   setValue("#ccb-console-enabled", String(config.console?.enabled !== false));
   setValue("#ccb-images-output", String(images.always_output === true));
@@ -2817,6 +2856,9 @@ function collectSettings() {
     temperature: Number(get("#ccb-temperature")) || 0,
     max_tokens: Number(get("#ccb-max-tokens")) || 0,
     use_native_tools: get("#ccb-native-tools") === "true",
+    thinking: {
+      enabled: get("#ccb-thinking-enabled") === "true",
+    },
     unload: {
       on_execute: get("#ccb-unload-on-execute") === "true",
     },
@@ -3059,6 +3101,7 @@ async function streamChat(messages, tools, onEvent, signal) {
   const decoder = new TextDecoder();
   let buffer = "";
   let text = "";
+  let reasoning = "";
   const toolCalls = [];
   try {
     for (;;) {
@@ -3079,6 +3122,9 @@ async function streamChat(messages, tools, onEvent, signal) {
         if (event.type === "text") {
           text += event.text;
           if (onEvent) onEvent(event);
+        } else if (event.type === "reasoning") {
+          reasoning += event.text;
+          if (onEvent) onEvent(event);
         } else if (event.type === "tool_call") {
           toolCalls.push(event);
           if (onEvent) onEvent(event);
@@ -3096,7 +3142,7 @@ async function streamChat(messages, tools, onEvent, signal) {
     }
     reader.releaseLock();
   }
-  return { text, toolCalls };
+  return { text, toolCalls, reasoning };
 }
 
 async function loadTestImage() {
@@ -3460,30 +3506,53 @@ const _workflowSessionNonce = globalThis.crypto?.randomUUID?.() || `${Date.now()
 let _workflowSessionSeq = 0;
 
 function resolveWorkflowKey() {
-  const workflow = app.workflowManager?.activeWorkflow || app.extensionManager?.workflow?.activeWorkflow;
+  // Ownership contract and regression checklist: docs/workflow-chat-ownership.md.
+  // Prefer the current store over a possibly stale legacy manager.
+  const workflow = app.extensionManager?.workflow?.activeWorkflow || app.workflowManager?.activeWorkflow;
   if (!workflow || typeof workflow !== "object") return null;
   if (_workflowSessionKeys.has(workflow)) return _workflowSessionKeys.get(workflow);
+  // ComfyUI restores this UUID with unsaved drafts. Never use app.graph.id:
+  // the shared canvas can still contain the previous tab during activation.
+  let id = workflow.activeState?.id || workflow.initialState?.id;
+  if (!id && typeof workflow.content === "string") {
+    try { id = JSON.parse(workflow.content)?.id; } catch { /* older frontend */ }
+  }
   const path = String(workflow.path ?? "").trim();
   const isTemporary = workflow.isTemporary === true || workflow.size === -1;
-  const key = path && !isTemporary ? `path:${path}` : `tmp:${_workflowSessionNonce}:${++_workflowSessionSeq}`;
+  // Do not freeze a random identity while modern ComfyUI is still loading it.
+  if (!id && workflow.isLoaded === false) return null;
+  const key = typeof id === "string" && id.trim() ? `id:${id.trim()}`
+    : path && !isTemporary ? `path:${path}` : `tmp:${_workflowSessionNonce}:${++_workflowSessionSeq}`;
   _workflowSessionKeys.set(workflow, key);
   return key;
 }
 
 function renderHistory() {
+  // Expose the displayed owner for diagnostics without exposing message content.
+  state.dom.messages.dataset.workflowKey = state.sessionKey || "";
   state.dom.messages.innerHTML = "";
   for (const message of state.messages) {
     if (message.synthetic) continue;
-    if ((message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content) {
-      const suffix = message.image_count ? `\n[${message.image_count} image(s)]` : "";
-      if (message.steer) appendSteer(message.content);
-      else appendBubble(message.role, message.content + suffix);
+    if ((message.role !== "user" && message.role !== "assistant") || typeof message.content !== "string") continue;
+    const reasoning = message.role === "assistant" && message.reasoning && showThinking() ? message.reasoning : "";
+    if (message.steer) {
+      if (message.content) appendSteer(message.content);
+      continue;
+    }
+    if (!message.content && !reasoning) continue;
+    const suffix = message.image_count ? `\n[${message.image_count} image(s)]` : "";
+    const bubble = message.content ? appendBubble(message.role, message.content + suffix) : null;
+    if (reasoning) {
+      const view = appendReasoning(bubble);
+      view.body.textContent = reasoning;
+      view.summary.textContent = `Thinking\u2026 (${reasoning.length.toLocaleString()} chars)`;
     }
   }
 }
 
 async function loadHistory() {
-  const key = state.sessionKey || resolveWorkflowKey() || "__default__";
+  const key = state.sessionKey || resolveWorkflowKey();
+  if (!key) return;
   state.sessionKey = key;
   const revision = state.historyRevision = (state.historyRevision || 0) + 1;
   state.historyLoading = true;
@@ -3512,10 +3581,19 @@ async function switchSession(newKey) {
   }
   debugLog("session", "switch", { key_hash: hashKey(newKey) });
   const saved = state.historyLoading ? Promise.resolve() : saveHistory(state.sessionKey);
+  state.sessionDrafts ||= new Map();
+  if (state.sessionKey) state.sessionDrafts.set(state.sessionKey, {
+    text: state.dom?.input?.value || "", attachments: state.attachments || [],
+  });
+  const draft = state.sessionDrafts.get(newKey);
   state.sessionKey = newKey;
   state.pendingSessionKey = null;
   state.messages = [];
-  state.attachments = [];
+  state.attachments = draft?.attachments || [];
+  if (state.dom?.input) {
+    state.dom.input.value = draft?.text || "";
+    state.dom.input.style.height = "auto";
+  }
   state.botHighlightedIds = [];
   renderAttachments();
   renderHistory();
@@ -3581,11 +3659,14 @@ function setupCanvasCoexistence() {
 }
 
 async function saveHistory(keyOverride) {
-  const key = keyOverride || state.sessionKey || resolveWorkflowKey() || "__default__";
+  // Never guess a message owner's key from whichever canvas is now active.
+  const key = keyOverride || state.sessionKey;
+  if (!key || key === "__default__") return;
   const messages = state.messages.map((message) => {
     const copy = { role: message.role, content: message.content };
     if (message.tool_calls) copy.tool_calls = message.tool_calls;
     if (message.tool_call_id) copy.tool_call_id = message.tool_call_id;
+    if (message.reasoning) copy.reasoning = String(message.reasoning).slice(0, REASONING_MAX_CHARS);
     if (message.images?.length || message.image_count) copy.image_count = message.images?.length || message.image_count;
     if (message.synthetic) copy.synthetic = true;
     if (message.steer) copy.steer = true;
@@ -3934,7 +4015,10 @@ app.registerExtension({
     api.addEventListener("execution_start", () => {
       if (state.config?.unload?.on_execute !== false) unloadLlm(true);
     });
-    state.sessionKey = resolveWorkflowKey() || "__default__";
+    state.sessionKey = resolveWorkflowKey();
+    // Until the first history read completes, these empty messages are a
+    // placeholder, not a user-cleared conversation that may be saved.
+    state.historyLoading = true;
     startSessionWatcher();
     setupCanvasCoexistence();
     try {

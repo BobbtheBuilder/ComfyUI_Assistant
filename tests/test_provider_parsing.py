@@ -24,6 +24,8 @@ class StreamParsingTest(unittest.IsolatedAsyncioTestCase):
         self.app.router.add_post("/v1/messages", self._anthropic_stream)
         self.app.router.add_post("/v1/bad/chat/completions", self._server_error)
         self.app.router.add_post("/v1/stream-error/chat/completions", self._stream_error)
+        self.app.router.add_post("/v1/reasoning/chat/completions", self._openai_reasoning_stream)
+        self.app.router.add_post("/reasoning/v1/messages", self._anthropic_reasoning_stream)
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
         site = web.TCPSite(self.runner, "127.0.0.1", 0)
@@ -74,6 +76,34 @@ class StreamParsingTest(unittest.IsolatedAsyncioTestCase):
             {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"query": "x"}'}},
             {"type": "content_block_stop"},
             {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+        ]
+        for payload in payloads:
+            await response.write(f"data: {json.dumps(payload)}\n\n".encode())
+        return response
+
+    async def _openai_reasoning_stream(self, request):
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        payloads = [
+            {"choices": [{"delta": {"reasoning_content": "let me "}}]},
+            {"choices": [{"delta": {"reasoning_content": "think"}}]},
+            {"choices": [{"delta": {"content": "Answer"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+        for payload in payloads:
+            await response.write(f"data: {json.dumps(payload)}\n\n".encode())
+        await response.write(b"data: [DONE]\n\n")
+        return response
+
+    async def _anthropic_reasoning_stream(self, request):
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        payloads = [
+            {"type": "content_block_start", "content_block": {"type": "thinking"}},
+            {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "step "}},
+            {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "one"}},
+            {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Done"}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
         ]
         for payload in payloads:
             await response.write(f"data: {json.dumps(payload)}\n\n".encode())
@@ -136,6 +166,43 @@ class StreamParsingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(calls[0]["arguments"]), {"query": "x"})
         self.assertEqual(events[-1]["type"], "done")
         self.assertEqual(events[-1]["finish_reason"], "tool_use")
+
+    async def test_openai_reasoning_is_streamed_before_text(self):
+        events = [
+            event
+            async for event in providers._openai_chat(
+                self._config(f"{self.base}/reasoning"), [{"role": "user", "content": "hi"}], []
+            )
+        ]
+        self.assertEqual([event["type"] for event in events][:2], ["reasoning", "reasoning"])
+        self.assertEqual("".join(e["text"] for e in events if e["type"] == "reasoning"), "let me think")
+        self.assertEqual("".join(e["text"] for e in events if e["type"] == "text"), "Answer")
+        self.assertEqual(events[-1]["type"], "done")
+
+    async def test_reasoning_events_are_omitted_when_disabled(self):
+        events = [
+            event
+            async for event in providers._openai_chat(
+                self._config(f"{self.base}/reasoning", thinking={"enabled": False}),
+                [{"role": "user", "content": "hi"}],
+                [],
+            )
+        ]
+        self.assertFalse(any(event["type"] == "reasoning" for event in events))
+        self.assertEqual("".join(e["text"] for e in events if e["type"] == "text"), "Answer")
+
+    async def test_anthropic_thinking_delta_is_streamed(self):
+        events = [
+            event
+            async for event in providers._anthropic_chat(
+                self._config(f"{self.root}/reasoning", provider="anthropic"),
+                [{"role": "user", "content": "hi"}],
+                [],
+            )
+        ]
+        self.assertEqual([event["type"] for event in events][:2], ["reasoning", "reasoning"])
+        self.assertEqual("".join(e["text"] for e in events if e["type"] == "reasoning"), "step one")
+        self.assertEqual("".join(e["text"] for e in events if e["type"] == "text"), "Done")
 
     async def test_chat_events_reports_missing_model(self):
         events = [event async for event in providers.chat_events({"provider": "openai", "model": ""}, [], [])]

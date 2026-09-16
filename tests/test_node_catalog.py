@@ -105,3 +105,53 @@ class CatalogTest(unittest.TestCase):
         examples = node_catalog.example_nodes({"1": {"class_type": "LoadImage", "inputs": {}},
             "2": {"class_type": "BlendExact", "inputs": {"image": ["1", 0], "strength": 0.5}}})
         self.assertEqual(examples[1]["incoming"], [{"source_type": "LoadImage", "source_slot": 0, "target_input": "image"}])
+
+
+class _FlakyMapping:
+    """Mapping that raises the registry-race RuntimeError on its first copy."""
+
+    def __init__(self, data):
+        self._data = dict(data)
+        self.copies = 0
+
+    def keys(self):
+        self.copies += 1
+        if self.copies == 1:
+            raise RuntimeError("dictionary changed size during iteration")
+        return self._data.keys()
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __len__(self):
+        return len(self._data)
+
+
+
+class _AlwaysFlakyMapping:
+    def keys(self):
+        raise RuntimeError("dictionary changed size during iteration")
+
+
+class SnapshotTest(unittest.TestCase):
+    def test_returns_copies_isolated_from_later_mutations(self):
+        live = {"A": object()}
+        names = {"A": "A"}
+        with patch.object(node_catalog, "registry", return_value=(live, names)):
+            mapping, name_snapshot = node_catalog.snapshot()
+        live["B"] = object()
+        names["B"] = "B"
+        self.assertEqual(set(mapping), {"A"})
+        self.assertEqual(name_snapshot, {"A": "A"})
+
+    def test_retries_when_registry_is_mutated_during_copy(self):
+        flaky = _FlakyMapping({"A": 1})
+        with patch.object(node_catalog, "registry", return_value=(flaky, {})):
+            mapping, _ = node_catalog.snapshot(attempts=3, delay=0)
+        self.assertEqual(mapping, {"A": 1})
+        self.assertGreaterEqual(flaky.copies, 2)
+
+    def test_raises_when_it_never_settles(self):
+        with patch.object(node_catalog, "registry", return_value=(_AlwaysFlakyMapping(), {})):
+            with self.assertRaises(RuntimeError):
+                node_catalog.snapshot(attempts=2, delay=0)

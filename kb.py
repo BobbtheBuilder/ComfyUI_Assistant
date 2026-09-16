@@ -342,7 +342,7 @@ def _node_content(info: dict[str, Any]) -> str:
 
 
 def index_node_schemas() -> int:
-    mapping, _ = node_catalog.registry()
+    mapping, _ = node_catalog.snapshot()
     conn = _connect()
     try:
         _init(conn)
@@ -668,7 +668,7 @@ def _build_fingerprint() -> str:
     """
     parts: dict[str, Any] = {"version": KB_BUILD_VERSION}
     try:
-        mapping, _ = node_catalog.registry()
+        mapping, _ = node_catalog.snapshot()
         parts["node_types"] = sorted(str(name) for name in mapping)
     except Exception:
         parts["node_types"] = []
@@ -1067,7 +1067,7 @@ def node_coverage() -> dict[str, Any]:
         records = {name: {"schema_error": error, "purpose": {"text": purpose}} for name, error, purpose in conn.execute(
             "SELECT name, json_extract(record, '$.schema_error'), json_extract(record, '$.purpose.text') FROM node_records")}
         try:
-            mapping, _ = node_catalog.registry()
+            mapping, _ = node_catalog.snapshot(attempts=3, delay=0.05)
         except Exception as exc:
             return {"registry_available": False, "error": str(exc), "indexed": len(records)}
         registered = set(mapping)

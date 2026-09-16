@@ -171,6 +171,54 @@
   border: 1px solid var(--ccb-border);
 }
 
+#ccb-root .ccb-reasoning {
+  align-self: flex-start;
+  max-width: 88%;
+  border: 1px dashed var(--ccb-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 12px;
+  color: var(--ccb-muted);
+}
+
+#ccb-root .ccb-reasoning-summary {
+  cursor: pointer;
+  padding: 5px 10px;
+  font-style: italic;
+  color: var(--ccb-muted);
+  user-select: none;
+  list-style: none;
+}
+
+#ccb-root .ccb-reasoning-summary::marker,
+#ccb-root .ccb-reasoning-summary::-webkit-details-marker {
+  display: none;
+}
+
+#ccb-root .ccb-reasoning-summary::before {
+  content: "\25B8";
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.15s ease;
+}
+
+#ccb-root .ccb-reasoning[open] .ccb-reasoning-summary::before {
+  transform: rotate(90deg);
+}
+
+#ccb-root .ccb-reasoning-body {
+  max-height: 260px;
+  overflow: auto;
+  padding: 0 10px 8px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ccb-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid var(--ccb-border);
+}
+
 #ccb-root .ccb-msg.ccb-steer {
   align-self: flex-end;
   background: rgba(79, 140, 255, 0.14);
