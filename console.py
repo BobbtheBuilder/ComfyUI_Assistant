@@ -5,26 +5,43 @@ import threading
 from collections import deque
 from typing import Any
 
-MAX_LINES = 500
-BUFFER_SIZE = 2000
-
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _ERROR_RE = re.compile(r"\b(ERROR|WARNING|CRITICAL|Traceback|Exception|Error|Warning)\b")
 
 _lock = threading.RLock()
-_buffer: deque[dict[str, Any]] = deque(maxlen=BUFFER_SIZE)
+_buffer: deque[dict[str, Any]] | None = None
 _registered = False
+
+
+def _limit(name: str, default: int = 0) -> int:
+    try:
+        try:
+            from .config_store import CONFIG_STORE
+        except ImportError:
+            from config_store import CONFIG_STORE
+        return CONFIG_STORE.get_limit(name, default)
+    except Exception:
+        return default
+
+
+def _entries() -> deque[dict[str, Any]]:
+    global _buffer
+    if _buffer is None:
+        size = _limit("console_buffer", 100000)
+        _buffer = deque() if size <= 0 else deque(maxlen=size)
+    return _buffer
 
 
 def _capture(entries: Any) -> None:
     if not isinstance(entries, (list, tuple)):
         return
     with _lock:
+        buffer = _entries()
         for entry in entries:
             if isinstance(entry, dict):
-                _buffer.append({"t": str(entry.get("t", "")), "m": str(entry.get("m", ""))})
+                buffer.append({"t": str(entry.get("t", "")), "m": str(entry.get("m", ""))})
             else:
-                _buffer.append({"t": "", "m": str(entry)})
+                buffer.append({"t": "", "m": str(entry)})
 
 
 def _register() -> None:
@@ -59,13 +76,16 @@ def _scrub(text: str) -> str:
         return text
 
 
-def recent(lines: int = MAX_LINES, level: str | None = None, entries: Any = None) -> dict[str, Any]:
-    count = max(1, min(int(lines or MAX_LINES), MAX_LINES))
+def recent(lines: int = 0, level: str | None = None, entries: Any = None) -> dict[str, Any]:
+    try:
+        count = int(lines or 0)
+    except (TypeError, ValueError):
+        count = 0
     if entries is not None:
         source = list(entries)
     else:
         with _lock:
-            source = list(_buffer)
+            source = list(_entries())
         if not source:
             try:
                 import app.logger as comfy_logger
@@ -90,6 +110,6 @@ def recent(lines: int = MAX_LINES, level: str | None = None, entries: Any = None
             continue
         collected.append({"t": timestamp, "m": _scrub(message)})
 
-    if len(collected) > count:
+    if count > 0 and len(collected) > count:
         collected = collected[-count:]
     return {"lines": collected, "total": len(collected), "available": True}

@@ -41,7 +41,7 @@ EXCLUDED_DIRS = {
 DOC_EXTENSIONS = (".md", ".mdx", ".txt")
 CHUNK_CHARS = 1200
 CHUNK_OVERLAP = 150
-MAX_FILE_BYTES = 2_000_000
+
 
 # Bump when the indexing logic changes so the next start rebuilds once instead of
 # skipping on a stale fingerprint.
@@ -50,7 +50,7 @@ KB_BUILD_VERSION = 1
 EXAMPLE_DIR_NAMES = {"example_workflows", "example_workflow", "examples", "workflows"}
 README_URL = "https://raw.githubusercontent.com/comfyanonymous/ComfyUI/master/README.md"
 EMBED_BATCH = 32
-EMBED_MAX_CHARS = 2000
+
 
 _lock = threading.RLock()
 _state: dict[str, Any] = {
@@ -97,6 +97,18 @@ def _custom_node_dirs() -> list[str]:
         return []
     paths = folder_paths.folder_names_and_paths.get("custom_nodes", ([], set()))[0]
     return [os.path.realpath(path) for path in paths if os.path.isdir(path)]
+
+
+def _limit(name: str, default: int = 0) -> int:
+    """0 means no cap. Reads the shared limits settings."""
+    try:
+        try:
+            from .config_store import CONFIG_STORE
+        except ImportError:
+            from config_store import CONFIG_STORE
+        return CONFIG_STORE.get_limit(name, default)
+    except Exception:
+        return default
 
 
 def _connect() -> sqlite3.Connection:
@@ -256,7 +268,8 @@ def index_local() -> int:
                         stat = os.stat(full)
                     except OSError:
                         continue
-                    if stat.st_size > MAX_FILE_BYTES:
+                    max_bytes = _limit("kb_max_file_bytes", 0)
+                    if max_bytes and stat.st_size > max_bytes:
                         continue
                     pack = _pack_for_path(full, root)
                     rel = os.path.relpath(full, root)
@@ -307,7 +320,7 @@ def _spec_text(spec: Any) -> str:
     except (TypeError, IndexError):
         return str(spec)
     if isinstance(type_part, (list, tuple)):
-        type_text = "enum(" + ", ".join(str(value) for value in type_part[:40]) + ")"
+        type_text = "enum(" + ", ".join(str(value) for value in type_part) + ")"
     else:
         type_text = str(type_part)
     if not isinstance(options, dict):
@@ -394,14 +407,14 @@ def _workflow_summary(data: Any) -> str:
             types.append(node_type)
             widgets = node.get("widgets_values")
             if isinstance(widgets, list) and widgets:
-                values = ", ".join(str(value)[:40] for value in widgets[:3])
+                values = ", ".join(str(value) for value in widgets)
                 settings.append(f"{node_type}: {values}")
     elif data and all(isinstance(value, dict) and "class_type" in value for value in data.values()):
         for value in data.values():
             node_type = str(value.get("class_type") or "")
             types.append(node_type)
             inputs = value.get("inputs") or {}
-            values = ", ".join(f"{key}={str(item)[:30]}" for key, item in list(inputs.items())[:3])
+            values = ", ".join(f"{key}={str(item)}" for key, item in inputs.items())
             if values:
                 settings.append(f"{node_type}: {values}")
     else:
@@ -412,7 +425,7 @@ def _workflow_summary(data: Any) -> str:
     lines = ["Example workflow."]
     lines.append("Nodes: " + ", ".join(f"{name} x{count}" if count > 1 else name for name, count in sorted(counts.items())))
     if settings:
-        lines.append("Settings: " + " | ".join(settings[:12]))
+        lines.append("Settings: " + " | ".join(settings))
     return "\n".join(lines)
 
 
@@ -435,7 +448,8 @@ def index_examples() -> int:
                         continue
                     full = os.path.join(dirpath, name)
                     try:
-                        if os.path.getsize(full) > MAX_FILE_BYTES:
+                        max_bytes = _limit("kb_max_file_bytes", 0)
+                        if max_bytes and os.path.getsize(full) > max_bytes:
                             continue
                         with open(full, "r", encoding="utf-8", errors="replace") as handle:
                             data = json.load(handle)
@@ -768,7 +782,7 @@ def index_embeddings() -> int:
         done = 0
         for start in range(0, total, EMBED_BATCH):
             batch = pending[start:start + EMBED_BATCH]
-            texts = [str(content)[:EMBED_MAX_CHARS] for _, content in batch]
+            texts = [str(content) for _, content in batch]
             try:
                 vectors = asyncio.run(providers.embed(config, texts, model))
             except Exception as exc:
@@ -868,7 +882,7 @@ def _vector_search(conn: sqlite3.Connection, query: str, limit: int, source: str
         if source and row[0] != source:
             continue
         results.append((chunk_id, _row_to_result(row, query)))
-        if len(results) >= limit:
+        if limit and len(results) >= limit:
             break
     return results
 
@@ -1082,8 +1096,11 @@ def node_coverage() -> dict[str, Any]:
         conn.close()
 
 
-def _snippet(content: str, query: str, length: int = 500) -> str:
-    if len(content) <= length:
+def _snippet(content: str, query: str, length: int = 0) -> str:
+    # length <= 0 returns the full chunk (chunks are already size-bounded by the chunker).
+    if length and length > 0 and len(content) <= length:
+        return content
+    if not length or length <= 0:
         return content
     lowered = content.lower()
     position = -1
@@ -1110,8 +1127,16 @@ def _row_to_result(row: Any, query: str) -> dict[str, Any]:
     }
 
 
+def _wanted(limit: Any) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
 def _fts_rows(conn: sqlite3.Connection, query: str, limit: int, source: str | None) -> list[tuple[int, dict[str, Any]]]:
-    match = fts_query(query, min_length=2, limit=12)
+    match = fts_query(query, min_length=2, limit=0)
     if not match:
         return []
     sql = (
@@ -1123,8 +1148,10 @@ def _fts_rows(conn: sqlite3.Connection, query: str, limit: int, source: str | No
     if source:
         sql += " AND c.source_kind = ?"
         params.append(source)
-    sql += " ORDER BY bm25(chunks_fts) LIMIT ?"
-    params.append(max(1, min(limit, 40)))
+    sql += " ORDER BY bm25(chunks_fts)"
+    if limit and limit > 0:
+        sql += " LIMIT ?"
+        params.append(limit)
     return [(int(row[0]), _row_to_result(tuple(row)[1:], query)) for row in conn.execute(sql, params).fetchall()]
 
 
@@ -1132,15 +1159,16 @@ def _search_conn(conn: sqlite3.Connection, query: str, limit: int, source: str |
     return [item for _chunk_id, item in _fts_rows(conn, query, limit, source)]
 
 
-def search(query: str, limit: int = 6, source: str | None = None) -> list[dict[str, Any]]:
+def search(query: str, limit: int = 0, source: str | None = None) -> list[dict[str, Any]]:
+    limit = _wanted(limit)
     conn = _connect()
     try:
         _init(conn)
-        ranked = max(limit * 3, 12)
+        ranked = limit * 3 if limit else 0
         fts = _fts_rows(conn, query, ranked, source)
         vectors = _vector_search(conn, query, ranked, source)
         if not vectors:
-            return [item for _chunk_id, item in fts[:limit]]
+            return [item for _chunk_id, item in (fts[:limit] if limit else fts)]
         scores: dict[int, float] = {}
         items: dict[int, dict[str, Any]] = {}
         for rank, (chunk_id, item) in enumerate(fts):
@@ -1149,23 +1177,30 @@ def search(query: str, limit: int = 6, source: str | None = None) -> list[dict[s
         for rank, (chunk_id, item) in enumerate(vectors):
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (60 + rank)
             items.setdefault(chunk_id, item)
-        ordered = sorted(scores, key=lambda chunk_id: -scores[chunk_id])[:limit]
+        ordered = sorted(scores, key=lambda chunk_id: -scores[chunk_id])
+        if limit:
+            ordered = ordered[:limit]
         return [items[chunk_id] for chunk_id in ordered]
     finally:
         conn.close()
 
 
-def node_docs(node_type: str, limit: int = 8) -> dict[str, Any]:
+def node_docs(node_type: str, limit: int = 0) -> dict[str, Any]:
     conn = _connect()
     try:
         _init(conn)
-        limit = max(1, min(int(limit), 20))
+        limit = _wanted(limit)
         try:
             live_record = node_catalog.record(node_type)
         except Exception as exc:
             live_record = {"name": node_type, "available": False, "schema_error": str(exc)}
+        example_sql = "SELECT path, record FROM node_examples WHERE node_type = ? ORDER BY path"
+        example_args: tuple[Any, ...] = (node_type,)
+        if limit:
+            example_sql += " LIMIT ?"
+            example_args = (node_type, limit)
         linked_examples = [{"path": path, **json.loads(value)} for path, value in conn.execute(
-            "SELECT path, record FROM node_examples WHERE node_type = ? ORDER BY path LIMIT ?", (node_type, limit))]
+            example_sql, example_args)]
         row = conn.execute(
             "SELECT pack FROM chunks WHERE source_kind = 'node' AND source = ? LIMIT 1",
             (node_type,),
@@ -1175,20 +1210,23 @@ def node_docs(node_type: str, limit: int = 8) -> dict[str, Any]:
             _row_to_result(item, node_type)
             for item in conn.execute(
                 "SELECT source_kind, source, pack, path, url, title, heading, content "
-                "FROM chunks WHERE source_kind = 'node' AND source = ? LIMIT 2",
+                "FROM chunks WHERE source_kind = 'node' AND source = ?",
                 (node_type,),
             ).fetchall()
         ]
         if pack:
-            results.extend(
-                _row_to_result(item, node_type)
-                for item in conn.execute(
-                    "SELECT source_kind, source, pack, path, url, title, heading, content "
-                    "FROM chunks WHERE source_kind = 'pack' AND pack = ? AND instr(lower(content), lower(?)) > 0 LIMIT ?",
-                    (pack, node_type, max(1, limit - len(results))),
-                ).fetchall()
+            pack_sql = (
+                "SELECT source_kind, source, pack, path, url, title, heading, content "
+                "FROM chunks WHERE source_kind = 'pack' AND pack = ? AND instr(lower(content), lower(?)) > 0"
             )
-        if len(results) < limit:
+            pack_args: list[Any] = [pack, node_type]
+            if limit:
+                pack_sql += " LIMIT ?"
+                pack_args.append(max(1, limit - len(results)))
+            results.extend(
+                _row_to_result(item, node_type) for item in conn.execute(pack_sql, pack_args).fetchall()
+            )
+        if not limit or len(results) < limit:
             seen = {(item["source_kind"], item["path"], item["title"], item["heading"]) for item in results}
             for item in _search_conn(conn, node_type, limit, source=None):
                 key = (item["source_kind"], item["path"], item["title"], item["heading"])
@@ -1196,7 +1234,7 @@ def node_docs(node_type: str, limit: int = 8) -> dict[str, Any]:
                     continue
                 seen.add(key)
                 results.append(item)
-                if len(results) >= limit:
+                if limit and len(results) >= limit:
                     break
         if not pack:
             pack = next((item["pack"] for item in results if item["pack"]), "")

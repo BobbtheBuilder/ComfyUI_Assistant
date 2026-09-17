@@ -500,7 +500,7 @@ test("normal agent uses concurrent lookups and keeps tool messages ordered", asy
   const state = { messages: [], runId: 0 };
   let turn = 0;
   const calls = ["search_docs", "get_node_docs"].map((name, id) => ({ name, id: String(id), arguments: "{}" }));
-  const c = load(["isLookupTool", "runToolBatch", "runAgent", "runTool", "recordToolResult"], {
+  const c = load(["limitSetting", "isLookupTool", "runToolBatch", "runAgent", "runTool", "recordToolResult"], {
     state, setBusy: () => {}, flushInjections: () => false,
     streamAssistantReply: async () => turn++ ? { text: "done", toolCalls: [] } : { text: "", toolCalls: calls },
     toOpenAiToolCall: call => call, safeParse: JSON.parse, safeStringify: JSON.stringify,
@@ -551,7 +551,7 @@ test("inline tool actions also use ordered concurrent lookups", async () => {
   const started = [];
   const state = { messages: [], runId: 0 };
   let turn = 0;
-  const c = load(["isLookupTool", "runToolBatch", "runAgent", "recordToolResult"], {
+  const c = load(["limitSetting", "isLookupTool", "runToolBatch", "runAgent", "recordToolResult"], {
     state, setBusy: () => {}, flushInjections: () => false,
     streamAssistantReply: async () => ({ text: turn++ ? "done" : "actions", toolCalls: [] }),
     extractInlineActions: text => text === "actions" ? [{ name: "search_docs", arguments: { query: "a" } },

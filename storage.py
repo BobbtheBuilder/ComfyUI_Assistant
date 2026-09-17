@@ -15,8 +15,11 @@ def connect(path: str) -> sqlite3.Connection:
     return conn
 
 
-def fts_query(query: str, min_length: int = 2, limit: int = 16) -> str:
+def fts_query(query: str, min_length: int = 2, limit: int = 0) -> str:
+    """Build an OR query from tokens. ``limit`` <= 0 includes every token."""
     tokens = [token for token in re.findall(r"[A-Za-z0-9_]+", query or "") if len(token) >= min_length]
     if not tokens:
         return ""
-    return " OR ".join(f'"{token}"' for token in tokens[:limit])
+    if limit and limit > 0:
+        tokens = tokens[:limit]
+    return " OR ".join(f'"{token}"' for token in tokens)

@@ -18,7 +18,7 @@ DEFAULT_ENDPOINTS = {
 
 async def _read_error(response: aiohttp.ClientResponse) -> str:
     detail = await response.text()
-    return f"Search provider returned HTTP {response.status}: {detail[:500]}"
+    return f"Search provider returned HTTP {response.status}: {detail}"
 
 
 async def _tavily(session: aiohttp.ClientSession, key: str, query: str, count: int) -> list[dict[str, str]]:
@@ -77,6 +77,7 @@ async def search(config: Mapping[str, Any], query: str, count: int | None = None
     if not key:
         raise RuntimeError("No web search API key configured. Open settings and add one.")
     limit = int(count or websearch.get("max_results") or 5)
-    limit = max(1, min(limit, 20))
+    if limit < 1:
+        limit = 5
     async with aiohttp.ClientSession(timeout=_timeout()) as session:
         return await engine(session, key, query, limit)

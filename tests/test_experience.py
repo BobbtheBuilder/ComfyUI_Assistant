@@ -99,17 +99,27 @@ class ExperienceStoreTest(unittest.TestCase):
         self.assertEqual(results[0]["kind"], "success")
         self.assertEqual(results[0]["verdict"], "approved")
 
-    def test_retention_prunes_old_records(self):
-        with patch.object(experience, "MAX_RECORDS", 3):
-            for index in range(5):
-                experience.add_experience({
-                    "kind": "success",
-                    "task": f"task {index}",
-                    "fragment": {"nodes": [{"id": index, "type": "KSampler"}]},
-                })
+    def test_records_are_unbounded_until_pruned(self):
+        for index in range(5):
+            experience.add_experience({
+                "kind": "success",
+                "task": f"task {index}",
+                "fragment": {"nodes": [{"id": index, "type": "KSampler"}]},
+            })
+        self.assertEqual(len(experience.list_experiences()), 5)
+        removed = experience.prune(3)
+        self.assertEqual(removed, 2)
         stored = experience.list_experiences()
-        self.assertEqual(len(stored), 3)
         self.assertEqual([item["task"] for item in stored], ["task 4", "task 3", "task 2"])
+
+    def test_search_without_limit_returns_everything(self):
+        for index in range(5):
+            experience.add_experience({
+                "kind": "success",
+                "task": f"sampler workflow {index}",
+                "fragment": {"nodes": [{"id": index, "type": "KSampler"}]},
+            })
+        self.assertEqual(len(experience.search("sampler workflow", 0)), 5)
 
     def test_revalidate_flags_missing_and_changed_nodes(self):
         fragment = {"nodes": [{"id": 1, "type": "Stable"}, {"id": 2, "type": "Gone"}]}

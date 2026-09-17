@@ -15,7 +15,7 @@ if _kb_config.get("enabled", True):
     kb.start_background(
         auto_official=bool(_kb_config.get("auto_official", True)),
         refresh_days=int(_kb_config.get("refresh_days", 7)),
-        delay=20,
+        delay=0,
     )
 
 __all__ = ["__version__", "WEB_DIRECTORY", "NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]

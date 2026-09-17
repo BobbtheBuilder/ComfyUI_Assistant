@@ -632,7 +632,7 @@ function buildUi() {
             </div>
             <div class="ccb-field">
               <label>Lessons injected per message</label>
-              <input id="ccb-memory-limit" type="number" min="1" max="30" />
+              <input id="ccb-memory-limit" type="number" min="0" placeholder="0 = all" />
             </div>
             <div class="ccb-field">
               <label>Semantic lesson search (embeddings)</label>
@@ -677,7 +677,14 @@ function buildUi() {
             </div>
             <div class="ccb-field">
               <label>Examples recalled per message</label>
-              <input id="ccb-experience-limit" type="number" min="1" max="20" />
+              <input id="ccb-experience-limit" type="number" min="0" placeholder="0 = all" />
+            </div>
+            <div class="ccb-field">
+              <label>Keep last N records (0 = keep all; pruning is manual)</label>
+              <div class="ccb-row">
+                <input id="ccb-experience-keep" type="number" min="0" placeholder="0 = keep all" />
+                <button class="ccb-btn" id="ccb-experience-prune">Prune</button>
+              </div>
             </div>
             <div class="ccb-row">
               <button class="ccb-btn" id="ccb-experience-refresh">Refresh experience</button>
@@ -907,6 +914,7 @@ function wireUi() {
   root.querySelector("#ccb-experience-clear").addEventListener("click", () =>
     updateExperience({ action: "clear" }).catch((error) => appendNotice(error.message)),
   );
+  root.querySelector("#ccb-experience-prune").addEventListener("click", () => pruneExperiences());
   root.querySelector("#ccb-memory-clear").addEventListener("click", () =>
     updateMemory({ action: "clear" }).catch((error) => appendNotice(error.message)),
   );
@@ -1135,7 +1143,7 @@ function nodeDetails(id) {
   };
 }
 
-async function searchInstalledNodes(query, limit = 25) {
+async function searchInstalledNodes(query, limit = 0) {
   const defs = await getNodeDefs();
   if (state.nodeSearchCache?.defs !== defs) {
     const entries = Object.entries(defs).map(([type, def]) => ({
@@ -1154,7 +1162,7 @@ async function searchInstalledNodes(query, limit = 25) {
   for (const entry of state.nodeSearchCache.entries) {
     if (!needle || entry.text.includes(needle)) {
       results.push({ ...entry.result });
-      if (results.length >= limit) break;
+      if (limit > 0 && results.length >= limit) break;
     }
   }
   return { count: results.length, results };
@@ -1282,13 +1290,13 @@ function disconnectLink(linkId, wrap = true) {
   return { ok: true };
 }
 
-const MAX_WIDGET_CHARS = 100000;
-const REASONING_MAX_CHARS = 20000;
+
 
 function widgetValueError(value) {
   if (typeof value !== "string") return "";
-  if (value.length > MAX_WIDGET_CHARS) {
-    return `Refused: value is too large (${value.length} chars, max ${MAX_WIDGET_CHARS}). Write it in smaller pieces or use a file-backed node.`;
+  const widgetChars = limitSetting("widget_chars", 0);
+  if (widgetChars > 0 && value.length > widgetChars) {
+    return `Refused: value is too large (${value.length} chars, max ${widgetChars}). Write it in smaller pieces or use a file-backed node.`;
   }
   if (/file:\/\/\//i.test(value)) {
     return "Refused: value contains a file:/// URL. Use a ComfyUI input path or an http(s) URL.";
@@ -1441,7 +1449,7 @@ function listPromptNodes() {
     }
   }
   if (!results.length) {
-    for (const node of (graph._nodes || []).filter(textWidget).slice(0, 8)) {
+    for (const node of (graph._nodes || []).filter(textWidget)) {
       const widget = textWidget(node);
       results.push({
         id: node.id,
@@ -1658,7 +1666,6 @@ async function validateWorkflow() {
       const wanted = Array.isArray(typeSpec) ? typeSpec : [typeSpec];
       const candidates = outputs
         .filter((output) => output.id !== node.id && (wanted.includes(output.outputType) || output.outputType === "*" || wanted.includes("*")))
-        .slice(0, 6)
         .map((output) => ({
           id: output.id,
           type: output.type,
@@ -1730,9 +1737,9 @@ function imageUrl({ filename, subfolder, type }) {
 }
 
 const IMAGE_EXT_RE = /\.(png|jpe?g|webp|bmp|gif|tiff?|avif)(\s*\[(input|output|temp)\])?$/i;
-const MAX_INPUT_IMAGES = 12;
+const inputImageLimit = () => limitSetting("input_images", 0);
 const CAROUSEL_NODE_TYPES = new Set(["MiniMaxH3ProjectAssetManager"]);
-const MAX_CAROUSEL_IMAGES = 6;
+const carouselImageLimit = () => limitSetting("carousel_images", 0);
 const CAROUSEL_MEDIA_ROUTE = "/minimax_h3_context_loop/project-assets/media";
 
 function looksLikeImageValue(value) {
@@ -1797,7 +1804,8 @@ function collectProjectAssetImages(node) {
       name: `${title}: ${String(asset.tag || asset.name || asset.original_name || id)}`,
       url: api.apiURL(`${CAROUSEL_MEDIA_ROUTE}?${params.toString()}`),
     });
-    if (found.length >= MAX_CAROUSEL_IMAGES) break;
+    const carouselLimit = carouselImageLimit();
+    if (carouselLimit > 0 && found.length >= carouselLimit) break;
   }
   return found;
 }
@@ -1859,7 +1867,8 @@ function collectInputImages() {
       if (!entry.url || seen.has(entry.url)) continue;
       seen.add(entry.url);
       results.push(entry);
-      if (results.length >= MAX_INPUT_IMAGES) return results;
+      const inputLimit = inputImageLimit();
+      if (inputLimit > 0 && results.length >= inputLimit) return results;
     }
   }
   return results;
@@ -2464,7 +2473,7 @@ async function runTool(name, args) {
 }
 
 function recordToolResult(name, result, toolCallId) {
-  const content = safeStringify(result, name === "get_node_docs" ? Infinity : 20000);
+  const content = safeStringify(result, name === "get_node_docs" ? 0 : limitSetting("tool_result_chars", 0));
   if (toolCallId) {
     state.messages.push({ role: "tool", tool_call_id: toolCallId, content });
   } else {
@@ -2783,7 +2792,12 @@ function safeStringify(value, maxLength = 20000) {
     text = JSON.stringify({ error: `serialize failed: ${String(error?.message || error)}` });
   }
   if (text === undefined) text = "null";
-  return truncate(text, maxLength);
+  return maxLength && maxLength > 0 ? truncate(text, maxLength) : text;
+}
+
+function limitSetting(name, fallback = 0) {
+  const value = Number(state.config?.limits?.[name]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 function appendChatCard(text, buttons) {
@@ -2871,12 +2885,12 @@ function populateSettings() {
   setValue("#ccb-context-keep", config.context?.keep_last ?? 12);
   setValue("#ccb-memory-enabled", String(config.memory?.enabled !== false));
   setValue("#ccb-memory-autodetect", String(config.memory?.auto_detect !== false));
-  setValue("#ccb-memory-limit", config.memory?.inject_limit ?? 8);
+  setValue("#ccb-memory-limit", config.memory?.inject_limit ?? 0);
   setValue("#ccb-memory-embed-enabled", String(config.memory?.embed?.enabled !== false));
   refreshEmbedModels(config.memory?.embed?.model || "", "#ccb-memory-embed-model");
   setValue("#ccb-experience-enabled", String(config.experience?.enabled !== false));
   setValue("#ccb-experience-approval", String(config.experience?.ask_approval !== false));
-  setValue("#ccb-experience-limit", config.experience?.recall_limit ?? 3);
+  setValue("#ccb-experience-limit", config.experience?.recall_limit ?? 0);
   setValue("#ccb-system-prompt", config.system_prompt || "");
   setValue("#ccb-websearch-provider", websearch.provider || "tavily");
   setPlaceholder("#ccb-websearch-key", websearch.api_key_configured ? "\u2022\u2022\u2022 configured" : "not set");
@@ -2992,7 +3006,7 @@ function collectSettings() {
     memory: {
       enabled: get("#ccb-memory-enabled") === "true",
       auto_detect: get("#ccb-memory-autodetect") === "true",
-      inject_limit: Number(get("#ccb-memory-limit")) || 8,
+      inject_limit: Number(get("#ccb-memory-limit")) || 0,
       embed: {
         enabled: get("#ccb-memory-embed-enabled") === "true",
         model: get("#ccb-memory-embed-model"),
@@ -3001,7 +3015,7 @@ function collectSettings() {
     experience: {
       enabled: get("#ccb-experience-enabled") === "true",
       ask_approval: get("#ccb-experience-approval") === "true",
-      recall_limit: Number(get("#ccb-experience-limit")) || 3,
+      recall_limit: Number(get("#ccb-experience-limit")) || 0,
     },
     debug: {
       enabled: isChecked("#ccb-debug-enabled"),
@@ -3714,7 +3728,8 @@ function onWorkflowMaybeChanged() {
 
 function startSessionWatcher() {
   api.addEventListener("graphChanged", onWorkflowMaybeChanged);
-  setInterval(onWorkflowMaybeChanged, 300);
+  const poll = limitSetting("session_poll_ms", 300);
+  if (poll > 0) setInterval(onWorkflowMaybeChanged, poll);
 }
 
 function assertRunWorkflow() {
@@ -3757,7 +3772,7 @@ async function saveHistory(keyOverride) {
     const copy = { role: message.role, content: message.content };
     if (message.tool_calls) copy.tool_calls = message.tool_calls;
     if (message.tool_call_id) copy.tool_call_id = message.tool_call_id;
-    if (message.reasoning) copy.reasoning = String(message.reasoning).slice(0, REASONING_MAX_CHARS);
+    if (message.reasoning) copy.reasoning = String(message.reasoning);
     if (message.images?.length || message.image_count) copy.image_count = message.images?.length || message.image_count;
     if (message.synthetic) copy.synthetic = true;
     if (message.steer) copy.steer = true;
@@ -3824,11 +3839,13 @@ function updateContextStatus() {
 }
 
 function truncateOldToolResults() {
+  const cap = limitSetting("old_tool_result_chars", 0);
+  if (!cap || cap <= 0) return;
   const keepRecent = 6;
   for (let index = 0; index < state.messages.length - keepRecent; index += 1) {
     const message = state.messages[index];
-    if (message.role === "tool" && typeof message.content === "string" && message.content.length > 2000) {
-      message.content = truncate(message.content, 2000);
+    if (message.role === "tool" && typeof message.content === "string" && message.content.length > cap) {
+      message.content = truncate(message.content, cap);
     }
   }
 }
@@ -3839,9 +3856,11 @@ function transcriptForSummary(messages) {
     if (message.tool_calls) {
       content += ` [called: ${message.tool_calls.map((call) => call.function?.name).join(", ")}]`;
     }
-    return `${message.role.toUpperCase()}: ${truncate(content, 1500)}`;
+    return `${message.role.toUpperCase()}: ${content}`;
   });
-  return truncate(lines.join("\n"), 24000);
+  const cap = limitSetting("summary_transcript_chars", 0);
+  const text = lines.join("\n");
+  return cap && cap > 0 ? truncate(text, cap) : text;
 }
 
 async function requestSummary(messages) {
@@ -3968,7 +3987,7 @@ async function refreshRelevantLessons(query) {
     state.relevantLessons = [];
     return;
   }
-  const limit = Number(state.config?.memory?.inject_limit) || 8;
+  const limit = Number(state.config?.memory?.inject_limit) || 0;
   try {
     const response = await api.fetchApi("/chatbot/memory/relevant", {
       method: "POST",
@@ -4058,9 +4077,9 @@ function experienceFragment() {
       type: node.type,
       title: node.title || node.type,
       mode: node.mode,
-      widgets: (node.widgets || []).slice(0, 12).map((widget) => ({
+      widgets: (node.widgets || []).map((widget) => ({
         name: widget.name,
-        value: truncate(String(widget.value ?? ""), 200),
+        value: String(widget.value ?? ""),
       })),
     });
   }
@@ -4105,20 +4124,20 @@ function installRunCapture() {
 }
 
 function experienceLine(item) {
-  const nodes = (item.node_types || []).slice(0, 12).join(", ") || "(no nodes)";
+  const nodes = (item.node_types || []).join(", ") || "(no nodes)";
   const status = item.execution_status || item.kind || "";
   const verdict = item.verdict && item.verdict !== "none" ? ` \u00b7 user ${item.verdict}` : "";
   const failure = item.failure_kind ? ` \u00b7 ${item.failure_kind}` : "";
-  const models = (item.models || []).slice(0, 4).join(", ");
+  const models = (item.models || []).join(", ");
   const changed = (item.revalidate || []).filter((node) => !node.installed || node.schema_changed);
   const caveat = changed.length
     ? ` \u00b7 WARNING: ${changed
         .map((node) => (node.installed ? `${node.type} schema changed` : `${node.type} not installed`))
         .join("; ")}`
     : "";
-  const head = `- ${truncate(item.task || "(no task)", 160)}: ${nodes} [${status}${failure}${verdict}]`;
+  const head = `- ${item.task || "(no task)"}: ${nodes} [${status}${failure}${verdict}]`;
   const tail = models ? ` models: ${models}` : "";
-  const error = item.error ? ` error: ${truncate(item.error, 160)}` : "";
+  const error = item.error ? ` error: ${item.error}` : "";
   return head + tail + error + caveat;
 }
 
@@ -4139,7 +4158,7 @@ async function refreshRelevantExperiences(task) {
     state.relevantExperiences = [];
     return;
   }
-  const limit = Number(state.config?.experience?.recall_limit) || 3;
+  const limit = Number(state.config?.experience?.recall_limit) || 0;
   try {
     const response = await api.fetchApi("/chatbot/experience/relevant", {
       method: "POST",
@@ -4157,7 +4176,7 @@ async function recallExperience(query, limit) {
   const response = await api.fetchApi("/chatbot/experience/relevant", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ task: query, limit: limit || 5 }),
+    body: JSON.stringify({ task: query, limit: limit ?? 0 }),
   });
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
@@ -4280,7 +4299,7 @@ function renderExperienceList() {
     });
     const meta = el("div", {
       class: "ccb-lesson-meta",
-      text: truncate(item.task || item.error || "(no task)", 120),
+      text: item.task || item.error || "(no task)",
     });
     const actions = el("div", { class: "ccb-lesson-actions" });
     const enabled = el("button", { class: "ccb-btn", text: item.enabled ? "Disable" : "Enable" });
@@ -4293,6 +4312,28 @@ function renderExperienceList() {
     actions.append(enabled, remove);
     row.append(text, meta, actions);
     container.appendChild(row);
+  }
+}
+
+async function pruneExperiences() {
+  const keep = Number(state.dom.root?.querySelector("#ccb-experience-keep")?.value) || 0;
+  if (keep <= 0) {
+    appendNotice("Set a keep count to prune (0 keeps everything).");
+    return;
+  }
+  try {
+    const response = await api.fetchApi("/chatbot/experience/prune", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ keep }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    state.experience = payload.experiences || [];
+    renderExperienceList();
+    appendNotice(`Pruned ${payload.removed || 0} experience record(s).`);
+  } catch (error) {
+    appendNotice(error.message);
   }
 }
 
@@ -4426,8 +4467,9 @@ app.registerExtension({
           ts: Date.now(),
         });
       }
-      if (state.lastOutputs.length > 20) {
-        state.lastOutputs = state.lastOutputs.slice(-20);
+      const recentLimit = limitSetting("recent_outputs", 0);
+      if (recentLimit > 0 && state.lastOutputs.length > recentLimit) {
+        state.lastOutputs = state.lastOutputs.slice(-recentLimit);
       }
     });
     api.addEventListener("execution_start", ({ detail }) => {

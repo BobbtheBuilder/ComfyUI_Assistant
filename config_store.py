@@ -100,11 +100,31 @@ DEFAULTS: dict[str, Any] = {
     "memory": {
         "enabled": True,
         "auto_detect": True,
-        "inject_limit": 8,
+        "inject_limit": 0,
         "embed": {
             "enabled": True,
             "model": "",
         },
+    },
+    # 0 means "no cap" everywhere a limit is read. Only set a value on purpose.
+    "limits": {
+        "window_cache_ttl": 0,
+        "error_detail_chars": 0,
+        "source_excerpt_chars": 0,
+        "widget_chars": 0,
+        "tool_result_chars": 0,
+        "old_tool_result_chars": 0,
+        "summary_transcript_chars": 0,
+        "session_poll_ms": 300,
+        "kb_max_file_bytes": 0,
+        "input_images": 0,
+        "carousel_images": 0,
+        "recent_outputs": 0,
+        "debug_max_events": 100000,
+        "debug_max_field_chars": 0,
+        "debug_max_file_bytes": 0,
+        "console_max_lines": 0,
+        "console_buffer": 100000,
     },
     "unload": {
         "on_execute": True,
@@ -116,7 +136,7 @@ DEFAULTS: dict[str, Any] = {
     "experience": {
         "enabled": True,
         "ask_approval": True,
-        "recall_limit": 3,
+        "recall_limit": 0,
     },
     "debug": {
         "enabled": False,
@@ -196,6 +216,15 @@ class ConfigStore:
     def is_debug_enabled(self) -> bool:
         with self._lock:
             return bool(self._config.get("debug", {}).get("enabled"))
+
+    def get_limit(self, name: str, default: int = 0) -> int:
+        """Read a numeric limit. 0 means no cap unless the caller says otherwise."""
+        with self._lock:
+            value = (self._config.get("limits") or {}).get(name, default)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
     def history(self, key: str = "__default__") -> list[Any]:
         stored = _read_json(self._history_path)

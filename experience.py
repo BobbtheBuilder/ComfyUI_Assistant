@@ -27,10 +27,6 @@ except ImportError:
 NODE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(NODE_DIR, "assistant_experience.sqlite")
 
-# Keep the store bounded; oldest records are pruned after each insert.
-MAX_RECORDS = 200
-SIMILAR_LIMIT = 20
-
 _lock = threading.RLock()
 _vectors_cache: dict[str, Any] = {"key": None, "count": -1, "ids": None, "matrix": None}
 
@@ -214,15 +210,27 @@ _SELECT_ORDERED = _SELECT_ALL + " ORDER BY id DESC"
 _FTS_SQL = (
     "SELECT " + ", ".join("e." + column for column in _COLUMNS.split(", "))
     + " FROM experiences_fts JOIN experiences e ON e.id = experiences_fts.rowid "
-    "WHERE experiences_fts MATCH ? ORDER BY bm25(experiences_fts) LIMIT ?"
+    "WHERE experiences_fts MATCH ? ORDER BY bm25(experiences_fts)"
 )
 
 
-def _prune(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        "DELETE FROM experiences WHERE id NOT IN (SELECT id FROM experiences ORDER BY id DESC LIMIT ?)",
-        (MAX_RECORDS,),
-    )
+def prune(keep: int) -> int:
+    """Manually drop everything older than the newest ``keep`` records. Never automatic."""
+    keep = int(keep or 0)
+    if keep <= 0:
+        return 0
+    with _lock:
+        conn = _connect()
+        try:
+            _init(conn)
+            cursor = conn.execute(
+                "DELETE FROM experiences WHERE id NOT IN (SELECT id FROM experiences ORDER BY id DESC LIMIT ?)",
+                (keep,),
+            )
+            conn.commit()
+            return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        finally:
+            conn.close()
 
 
 def add_experience(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -244,19 +252,19 @@ def add_experience(record: Mapping[str, Any]) -> dict[str, Any]:
     pack_fingerprints = fingerprints_for(node_types) if record.get("fingerprints") is None else record["fingerprints"]
     row = (
         kind,
-        str(record.get("task") or "")[:500],
-        str(record.get("workflow_key") or "")[:200],
-        str(record.get("prompt_id") or "")[:200],
+        str(record.get("task") or ""),
+        str(record.get("workflow_key") or ""),
+        str(record.get("prompt_id") or ""),
         _json(fragment),
         _json(record.get("models") or []),
         _json(pack_fingerprints or {}),
         " ".join(node_types),
         execution_status,
         failure_kind,
-        str(record.get("error") or "")[:2000],
+        str(record.get("error") or ""),
         verdict,
-        str(record.get("verdict_note") or "")[:500],
-        str(record.get("source") or "run")[:40],
+        str(record.get("verdict_note") or ""),
+        str(record.get("source") or "run"),
         now,
         now,
         1 if record.get("enabled", True) else 0,
@@ -272,7 +280,6 @@ def add_experience(record: Mapping[str, Any]) -> dict[str, Any]:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 row,
             )
-            _prune(conn)
             conn.commit()
             return {"id": cursor.lastrowid, "kind": kind, "failure_kind": failure_kind, "verdict": verdict}
         finally:
@@ -294,12 +301,12 @@ def update_verdict(experience_id: int, verdict: str, note: str = "", failure_kin
                 cursor = conn.execute(
                     "UPDATE experiences SET verdict = ?, verdict_note = ?, kind = 'failure', failure_kind = ?, "
                     "updated_at = ? WHERE id = ?",
-                    (verdict, str(note or "")[:500], kind, time.time(), int(experience_id)),
+                    (verdict, str(note or ""), kind, time.time(), int(experience_id)),
                 )
             else:
                 cursor = conn.execute(
                     "UPDATE experiences SET verdict = ?, verdict_note = ?, updated_at = ? WHERE id = ?",
-                    (verdict, str(note or "")[:500], time.time(), int(experience_id)),
+                    (verdict, str(note or ""), time.time(), int(experience_id)),
                 )
             conn.commit()
             return cursor.rowcount > 0
@@ -406,16 +413,19 @@ def _vector_rank(conn: sqlite3.Connection, query_vec: Any, limit: int) -> list[t
         if not item["enabled"]:
             continue
         out.append((experience_id, item))
-        if len(out) >= limit:
+        if limit and len(out) >= limit:
             break
     return out
 
 
 def _fts_rank(conn: sqlite3.Connection, query: str, limit: int) -> list[tuple[int, dict[str, Any]]]:
-    match = fts_query(query, min_length=3, limit=16)
+    match = fts_query(query, min_length=3, limit=0)
     if not match:
         return []
-    rows = conn.execute(_FTS_SQL, (match, limit)).fetchall()
+    if limit and limit > 0:
+        rows = conn.execute(_FTS_SQL + " LIMIT ?", (match, limit)).fetchall()
+    else:
+        rows = conn.execute(_FTS_SQL, (match,)).fetchall()
     return [(int(row[0]), _row_to_dict(row)) for row in rows]
 
 
@@ -426,12 +436,22 @@ def _fuse(ranked: list[list[tuple[int, dict[str, Any]]]], limit: int) -> list[di
         for rank, (experience_id, item) in enumerate(group):
             scores[experience_id] = scores.get(experience_id, 0.0) + 1.0 / (60 + rank)
             items.setdefault(experience_id, item)
-    ordered = sorted(scores, key=lambda experience_id: -scores[experience_id])[:limit]
+    ordered = sorted(scores, key=lambda experience_id: -scores[experience_id])
+    if limit and limit > 0:
+        ordered = ordered[:limit]
     return [items[experience_id] for experience_id in ordered]
 
 
-def search(query: str, limit: int = 8, query_vec: Any = None) -> list[dict[str, Any]]:
-    limit = max(1, min(int(limit), SIMILAR_LIMIT))
+def _wanted(limit: Any) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
+def search(query: str, limit: int = 0, query_vec: Any = None) -> list[dict[str, Any]]:
+    limit = _wanted(limit)
     with _lock:
         conn = _connect()
         try:
@@ -445,23 +465,25 @@ def search(query: str, limit: int = 8, query_vec: Any = None) -> list[dict[str, 
             conn.close()
 
 
-def relevant(task: str, limit: int = 3, query_vec: Any = None) -> list[dict[str, Any]]:
+def relevant(task: str, limit: int = 0, query_vec: Any = None) -> list[dict[str, Any]]:
     """Approved successes first, then matching failures, ranked by relevance."""
-    limit = max(1, min(int(limit), SIMILAR_LIMIT))
+    limit = _wanted(limit)
+    pool = limit * 4 if limit else 0
     with _lock:
         conn = _connect()
         try:
             _init(conn)
-            fts = _fts_rank(conn, task, limit * 4)
-            vectors = _vector_rank(conn, query_vec, limit * 4)
-            combined = _fuse([fts, vectors], limit * 4) if (fts and vectors) else [
+            fts = _fts_rank(conn, task, pool)
+            vectors = _vector_rank(conn, query_vec, pool)
+            combined = _fuse([fts, vectors], pool) if (fts and vectors) else [
                 item for _id, item in (fts or vectors)
             ]
             approved = [item for item in combined if item["kind"] == "success" and item["verdict"] == "approved"]
             failures = [item for item in combined if item["kind"] == "failure"]
             taken = {item["id"] for item in approved} | {item["id"] for item in failures}
             fallback = [item for item in combined if item["id"] not in taken]
-            return (approved + failures + fallback)[:limit]
+            ordered = approved + failures + fallback
+            return ordered[:limit] if limit else ordered
         finally:
             conn.close()
 
@@ -497,7 +519,7 @@ def pending_experiences() -> list[tuple[int, str]]:
             rows = conn.execute(
                 "SELECT e.id, e.task, e.node_types, e.error FROM experiences e "
                 "LEFT JOIN experience_vectors v ON v.experience_id = e.id "
-                "WHERE e.enabled = 1 AND v.experience_id IS NULL ORDER BY e.id DESC LIMIT 200"
+                "WHERE e.enabled = 1 AND v.experience_id IS NULL ORDER BY e.id DESC"
             ).fetchall()
             return [(int(row[0]), " ".join(str(part) for part in (row[1], row[2], row[3]) if part)) for row in rows]
         finally:

@@ -215,10 +215,19 @@ messages show with a `↪` marker. To stop entirely, use **Cancel**.
 | Context window | auto (0) | Override the auto-detected window. |
 | Auto-compact when over budget | On | Summarize older turns to fit. |
 | Keep last messages verbatim | 12 | How many recent messages stay untouched. |
-| Use saved lessons / auto-detect corrections / inject limit | On / On / 8 | Memory behavior. |
+| Use saved lessons / auto-detect corrections / inject limit | On / On / 0 | Memory behavior. `0` = inject every matching lesson. |
 | Record workflow experience (experimental) | On | Store approved workflow fragments and observed execution errors for the runs the assistant edited, and offer them as reference examples. |
 | Ask me to approve successful runs (experimental) | On | After a successful run of an assistant-edited fragment, ask whether the result was what you wanted. |
-| Examples recalled per message (experimental) | 3 | How many experience examples are injected per message. |
+| Examples recalled per message (experimental) | 0 | How many experience examples are injected per message. `0` = all matching. |
+
+### Limits
+
+There are **no functional caps by default**. Anything that still needs a bound is a setting in
+`chatbot_config.json` → `limits`, where **`0` means unlimited** (and the shipped default is `0`
+for every data/retrieval limit). Retrieval counts come from the request, storage is unbounded,
+and pruning is a manual action. The only non-zero defaults are the local ring buffers
+(`debug_max_events`, `console_buffer`) because they live in RAM — set them to `0` if you want
+those unbounded too.
 | Debug | Off | Record a privacy-safe diagnostic log. |
 
 ## Files and data

@@ -128,7 +128,7 @@ _SELECT_BY_ID = _SELECT_ALL + " WHERE id = ?"
 _SEARCH_SQL = (
     "SELECT " + ", ".join("l." + column for column in _COLUMNS.split(", "))
     + " FROM lessons_fts JOIN lessons l ON l.id = lessons_fts.rowid "
-    "WHERE lessons_fts MATCH ? AND l.enabled = 1 ORDER BY bm25(lessons_fts) LIMIT ?"
+    "WHERE lessons_fts MATCH ? AND l.enabled = 1 ORDER BY bm25(lessons_fts)"
 )
 _UPDATE_SQL = (
     "UPDATE lessons SET text = COALESCE(?, text), tags = COALESCE(?, tags), "
@@ -287,7 +287,9 @@ def _cosine_rank(conn: sqlite3.Connection, vector: Any, limit: int = 5) -> list[
         return []
     query = query / (np.linalg.norm(query) + 1e-9)
     scores = matrix @ query
-    order = np.argsort(-scores)[: max(1, int(limit))]
+    order = np.argsort(-scores)
+    if limit and limit > 0:
+        order = order[: int(limit)]
     return [(int(ids[position]), float(scores[position])) for position in order]
 
 
@@ -311,8 +313,18 @@ def _fuse(ranked_lists: list[list[tuple[int, dict[str, Any]]]], limit: int) -> l
         for rank, (lesson_id, item) in enumerate(ranked):
             scores[lesson_id] = scores.get(lesson_id, 0.0) + 1.0 / (60 + rank)
             items.setdefault(lesson_id, item)
-    ordered = sorted(scores, key=lambda lesson_id: -scores[lesson_id])[:limit]
+    ordered = sorted(scores, key=lambda lesson_id: -scores[lesson_id])
+    if limit and limit > 0:
+        ordered = ordered[:limit]
     return [items[lesson_id] for lesson_id in ordered]
+
+
+def _wanted(limit: Any) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
 
 
 def list_lessons(enabled_only: bool = False) -> list[dict[str, Any]]:
@@ -443,17 +455,22 @@ def clear_lessons() -> None:
             conn.close()
 
 
-def search(query: str, limit: int = 8, query_vec: Any = None) -> list[dict[str, Any]]:
-    limit = max(1, min(int(limit), 30))
-    match = fts_query(query, min_length=3, limit=16)
+def _search_rows(conn: sqlite3.Connection, match: str, limit: int) -> list[tuple[int, dict[str, Any]]]:
+    if limit and limit > 0:
+        rows = conn.execute(_SEARCH_SQL + " LIMIT ?", (match, limit)).fetchall()
+    else:
+        rows = conn.execute(_SEARCH_SQL, (match,)).fetchall()
+    return [(int(row[0]), _row_to_dict(row)) for row in rows]
+
+
+def search(query: str, limit: int = 0, query_vec: Any = None) -> list[dict[str, Any]]:
+    limit = _wanted(limit)
+    match = fts_query(query, min_length=3, limit=0)
     with _lock:
         conn = _connect()
         try:
             _init(conn)
-            fts: list[tuple[int, dict[str, Any]]] = []
-            if match:
-                rows = conn.execute(_SEARCH_SQL, (match, limit)).fetchall()
-                fts = [(int(row[0]), _row_to_dict(row)) for row in rows]
+            fts = _search_rows(conn, match, limit) if match else []
             vectors = _vector_results(conn, query_vec, limit) if query_vec is not None else []
             if not vectors:
                 return [item for _lesson_id, item in fts]
@@ -464,8 +481,8 @@ def search(query: str, limit: int = 8, query_vec: Any = None) -> list[dict[str, 
             conn.close()
 
 
-def relevant(query: str, limit: int = 8, query_vec: Any = None) -> list[dict[str, Any]]:
-    limit = max(1, min(int(limit), 30))
+def relevant(query: str, limit: int = 0, query_vec: Any = None) -> list[dict[str, Any]]:
+    limit = _wanted(limit)
     with _lock:
         conn = _connect()
         try:
@@ -474,11 +491,8 @@ def relevant(query: str, limit: int = 8, query_vec: Any = None) -> list[dict[str
             seen = {item["id"] for item in pinned}
             fused: list[dict[str, Any]] = []
             if str(query or "").strip() or query_vec is not None:
-                match = fts_query(query, min_length=3, limit=16)
-                fts: list[tuple[int, dict[str, Any]]] = []
-                if match:
-                    rows = conn.execute(_SEARCH_SQL, (match, limit)).fetchall()
-                    fts = [(int(row[0]), _row_to_dict(row)) for row in rows]
+                match = fts_query(query, min_length=3, limit=0)
+                fts = _search_rows(conn, match, limit) if match else []
                 vectors = _vector_results(conn, query_vec, limit) if query_vec is not None else []
                 if fts and vectors:
                     combined = _fuse([fts, vectors], limit)
@@ -491,11 +505,16 @@ def relevant(query: str, limit: int = 8, query_vec: Any = None) -> list[dict[str
                         seen.add(item["id"])
                         fused.append(item)
             else:
-                for row in conn.execute(_SELECT_ENABLED_LIMIT, (limit,)):
+                if limit and limit > 0:
+                    rows = conn.execute(_SELECT_ENABLED_LIMIT, (limit,)).fetchall()
+                else:
+                    rows = conn.execute(_SELECT_ENABLED).fetchall()
+                for row in rows:
                     item = _row_to_dict(row)
                     if item["id"] not in seen:
                         seen.add(item["id"])
                         fused.append(item)
-            return (pinned + fused)[: max(limit, len(pinned))]
+            ordered = pinned + fused
+            return ordered[:limit] if limit else ordered
         finally:
             conn.close()

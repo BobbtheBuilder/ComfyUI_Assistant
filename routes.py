@@ -39,6 +39,17 @@ def _effective_config(payload: Any) -> dict[str, Any]:
     return config
 
 
+def _limit_value(payload: Mapping[str, Any], key: str, default: int = 0) -> int:
+    """Read a caller-supplied limit. 0 is preserved (it means no cap)."""
+    value = payload.get(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _memory_embed_settings(config: Mapping[str, Any]) -> Mapping[str, Any] | None:
     memory_config = config.get("memory") or {}
     embed = memory_config.get("embed") or {}
@@ -312,7 +323,7 @@ async def docs_search(request: web.Request) -> web.Response:
     if source not in (None, "pack", "official", "node", "example", "registry", "model"):
         source = None
     try:
-        results = await asyncio.to_thread(kb.search, query, int(payload.get("limit") or 6), source)
+        results = await asyncio.to_thread(kb.search, query, _limit_value(payload, "limit", 0), source)
         return web.json_response({"results": results})
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
@@ -328,7 +339,7 @@ async def docs_node(request: web.Request) -> web.Response:
     if not node_type:
         return web.json_response({"error": "Missing node type."}, status=400)
     try:
-        result = await asyncio.to_thread(kb.node_docs, node_type, int(payload.get("limit") or 8))
+        result = await asyncio.to_thread(kb.node_docs, node_type, _limit_value(payload, "limit", 0))
         return web.json_response(result)
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
@@ -396,7 +407,7 @@ async def memory_search(request: web.Request) -> web.Response:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     query = str(payload.get("query") or "")
     vector = await _lesson_vector(_effective_config(payload), query)
-    lessons = await asyncio.to_thread(memory.search, query, int(payload.get("limit") or 8), vector)
+    lessons = await asyncio.to_thread(memory.search, query, _limit_value(payload, "limit", 0), vector)
     return web.json_response({"lessons": lessons})
 
 
@@ -408,7 +419,7 @@ async def memory_relevant(request: web.Request) -> web.Response:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     query = str(payload.get("query") or "")
     vector = await _lesson_vector(_effective_config(payload), query)
-    lessons = await asyncio.to_thread(memory.relevant, query, int(payload.get("limit") or 8), vector)
+    lessons = await asyncio.to_thread(memory.relevant, query, _limit_value(payload, "limit", 0), vector)
     return web.json_response({"lessons": lessons})
 
 
@@ -517,6 +528,18 @@ async def experience_manage(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "experiences": experiences})
 
 
+@routes.post("/chatbot/experience/prune")
+async def experience_prune(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        payload = {}
+    keep = _limit_value(payload, "keep", 0)
+    removed = await asyncio.to_thread(experience.prune, keep)
+    experiences = await asyncio.to_thread(experience.list_experiences)
+    return web.json_response({"removed": removed, "experiences": experiences})
+
+
 @routes.post("/chatbot/experience/search")
 async def experience_search(request: web.Request) -> web.Response:
     try:
@@ -525,7 +548,7 @@ async def experience_search(request: web.Request) -> web.Response:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     query = str(payload.get("query") or "")
     vector = await _experience_vector(_effective_config(payload), query)
-    results = await asyncio.to_thread(experience.search, query, int(payload.get("limit") or 8), vector)
+    results = await asyncio.to_thread(experience.search, query, _limit_value(payload, "limit", 0), vector)
     return web.json_response({"experiences": results})
 
 
@@ -537,7 +560,7 @@ async def experience_relevant(request: web.Request) -> web.Response:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     task = str(payload.get("task") or payload.get("query") or "")
     vector = await _experience_vector(_effective_config(payload), task)
-    results = await asyncio.to_thread(experience.relevant, task, int(payload.get("limit") or 3), vector)
+    results = await asyncio.to_thread(experience.relevant, task, _limit_value(payload, "limit", 0), vector)
     for item in results:
         item["revalidate"] = await asyncio.to_thread(
             experience.revalidate, item.get("fragment"), item.get("pack_fingerprints")
@@ -624,7 +647,11 @@ async def console_log(request: web.Request) -> web.Response:
     config = _effective_config(payload).get("console", {})
     if config.get("enabled") is False:
         return web.json_response({"lines": [], "total": 0, "available": False, "reason": "Console access is disabled in settings."})
-    lines = payload.get("lines") or config.get("lines") or 500
+    lines = payload.get("lines")
+    if lines is None:
+        lines = config.get("lines")
+    if lines is None:
+        lines = 0
     level = payload.get("level")
     result = await asyncio.to_thread(console.recent, lines, level)
     return web.json_response(result)

@@ -13,6 +13,18 @@ def registry():
     return nodes.NODE_CLASS_MAPPINGS, getattr(nodes, "NODE_DISPLAY_NAME_MAPPINGS", {})
 
 
+def _excerpt_limit() -> int:
+    """0 = include the full source excerpt."""
+    try:
+        try:
+            from .config_store import CONFIG_STORE
+        except ImportError:
+            from config_store import CONFIG_STORE
+        return CONFIG_STORE.get_limit("source_excerpt_chars", 0)
+    except Exception:
+        return 0
+
+
 def snapshot(attempts: int = 6, delay: float = 0.2) -> tuple[dict[str, Any], dict[str, Any]]:
     """Stable copies of the live node registries.
 
@@ -66,8 +78,11 @@ def record(node_type: str) -> dict[str, Any]:
         try:
             lines, line = inspect.getsourcelines(obj)
             source = "".join(lines)
+            limit = _excerpt_limit()
+            excerpt = source[:limit] if limit and limit > 0 else source
             result["source_evidence"].append({"kind": kind, "path": inspect.getsourcefile(obj), "line": line,
-                "docstring": inspect.cleandoc(obj.__doc__) if obj.__doc__ else "", "excerpt": source[:8000], "truncated": len(source) > 8000,
+                "docstring": inspect.cleandoc(obj.__doc__) if obj.__doc__ else "", "excerpt": excerpt,
+                "truncated": bool(limit and limit > 0 and len(source) > limit),
                 "sha256": hashlib.sha256(source.encode()).hexdigest()})
         except (OSError, TypeError):
             continue

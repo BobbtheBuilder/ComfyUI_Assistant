@@ -65,6 +65,12 @@ class MemoryStoreTest(unittest.TestCase):
         self.assertEqual(first["id"], second["id"])
         self.assertEqual(len(memory.list_lessons()), 1)
 
+    def test_search_without_limit_returns_all_matches(self):
+        for text in ("keep alpha blue", "beta drives cars", "gamma sings loudly",
+                     "delta writes poems", "epsilon climbs rocks"):
+            memory.add_lesson(text, tags="sampler")
+        self.assertEqual(len(memory.search("sampler", 0)), 5)
+
     def test_empty_lesson_rejected(self):
         with self.assertRaises(ValueError):
             memory.add_lesson("   ")

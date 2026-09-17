@@ -58,9 +58,21 @@ def _headers(config: Mapping[str, Any]) -> dict[str, str]:
     return headers
 
 
-async def _read_error(response: aiohttp.ClientResponse) -> str:
+def _limit_chars(config: Mapping[str, Any] | None, name: str) -> int:
+    if not config:
+        return 0
+    try:
+        return int((config.get("limits") or {}).get(name, 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+async def _read_error(response: aiohttp.ClientResponse, config: Mapping[str, Any] | None = None) -> str:
     detail = await response.text()
-    return f"Provider returned HTTP {response.status}: {detail[:1000]}"
+    limit = _limit_chars(config, "error_detail_chars")
+    if limit and limit > 0:
+        detail = detail[:limit]
+    return f"Provider returned HTTP {response.status}: {detail}"
 
 
 async def list_models(config: Mapping[str, Any]) -> list[str]:
@@ -72,7 +84,7 @@ async def list_models(config: Mapping[str, Any]) -> list[str]:
     async with aiohttp.ClientSession(timeout=_timeout()) as session:
         async with session.get(url, headers=_headers(config)) as response:
             if response.status >= 400:
-                raise RuntimeError(await _read_error(response))
+                raise RuntimeError(await _read_error(response, config))
             payload = await response.json()
     items = payload.get("data", payload.get("models", [])) if isinstance(payload, Mapping) else []
     models = []
@@ -229,7 +241,7 @@ async def _openai_chat(
     async with aiohttp.ClientSession(timeout=_timeout()) as session:
         async with session.post(url, headers=_headers(config), json=body) as response:
             if response.status >= 400:
-                yield {"type": "error", "error": await _read_error(response)}
+                yield {"type": "error", "error": await _read_error(response, config)}
                 return
             async for raw_line in response.content:
                 line = raw_line.decode("utf-8", errors="replace").strip()
@@ -300,7 +312,7 @@ async def _anthropic_chat(
     async with aiohttp.ClientSession(timeout=_timeout()) as session:
         async with session.post(url, headers=_headers(config), json=body) as response:
             if response.status >= 400:
-                yield {"type": "error", "error": await _read_error(response)}
+                yield {"type": "error", "error": await _read_error(response, config)}
                 return
             async for raw_line in response.content:
                 line = raw_line.decode("utf-8", errors="replace").strip()
@@ -491,15 +503,15 @@ async def context_window(config: Mapping[str, Any], model: str) -> int | None:
     return None
 
 
-_WINDOW_TTL_SECONDS = 300
 _window_cache: dict[tuple[Any, str, str], tuple[float, int | None]] = {}
 
 
 async def _cached_context_window(config: Mapping[str, Any], model: str) -> int | None:
     key = (config.get("provider"), _base_url(config), str(model or ""))
     now = time.time()
+    ttl = _positive_int((config.get("limits") or {}).get("window_cache_ttl"))
     cached = _window_cache.get(key)
-    if cached and now - cached[0] < _WINDOW_TTL_SECONDS:
+    if cached and (not ttl or now - cached[0] < ttl):
         return cached[1]
     try:
         window = await context_window(config, model)
@@ -543,7 +555,7 @@ async def summarize(config: Mapping[str, Any], text: str) -> str:
         async with aiohttp.ClientSession(timeout=_timeout()) as session:
             async with session.post(url, headers=_headers(config), json=body) as response:
                 if response.status >= 400:
-                    raise RuntimeError(await _read_error(response))
+                    raise RuntimeError(await _read_error(response, config))
                 payload = await response.json()
         parts = [block.get("text", "") for block in payload.get("content", []) if block.get("type") == "text"]
         return "".join(parts).strip()
@@ -562,7 +574,7 @@ async def summarize(config: Mapping[str, Any], text: str) -> str:
     async with aiohttp.ClientSession(timeout=_timeout()) as session:
         async with session.post(url, headers=_headers(config), json=body) as response:
             if response.status >= 400:
-                raise RuntimeError(await _read_error(response))
+                raise RuntimeError(await _read_error(response, config))
             payload = await response.json()
     choices = payload.get("choices") or []
     if not choices:
@@ -629,7 +641,7 @@ async def _ollama_embed(session: aiohttp.ClientSession, config: Mapping[str, Any
     url = f"{_api_root(config)}/api/embed"
     async with session.post(url, headers=_headers(config), json={"model": model, "input": texts}) as response:
         if response.status >= 400:
-            raise RuntimeError(await _read_error(response))
+            raise RuntimeError(await _read_error(response, config))
         payload = await response.json()
     return [list(vector) for vector in (payload.get("embeddings", []) if isinstance(payload, Mapping) else [])]
 
@@ -646,7 +658,7 @@ async def embed(config: Mapping[str, Any], texts: list[str], model: str = "") ->
             if response.status >= 400:
                 if config.get("provider") == "ollama":
                     return await _ollama_embed(session, config, texts, model)
-                raise RuntimeError(await _read_error(response))
+                raise RuntimeError(await _read_error(response, config))
             payload = await response.json()
     vectors = _embedding_vectors(payload)
     if not vectors and config.get("provider") == "ollama":
@@ -666,7 +678,7 @@ async def unload_models(config: Mapping[str, Any]) -> dict[str, Any]:
                 if response.status == 404:
                     return {"unsupported": True, "unloaded": [], "reason": "LM Studio v1 API is not available (needs 0.4.0+)."}
                 if response.status >= 400:
-                    raise RuntimeError(await _read_error(response))
+                    raise RuntimeError(await _read_error(response, config))
                 payload = await response.json()
             models = payload.get("models", []) if isinstance(payload, Mapping) else []
             for model in models:
@@ -689,7 +701,7 @@ async def unload_models(config: Mapping[str, Any]) -> dict[str, Any]:
         async with aiohttp.ClientSession(timeout=_timeout()) as session:
             async with session.get(url, headers=_headers(config)) as response:
                 if response.status >= 400:
-                    raise RuntimeError(await _read_error(response))
+                    raise RuntimeError(await _read_error(response, config))
                 payload = await response.json()
             models = payload.get("models", []) if isinstance(payload, Mapping) else []
             for model in models:

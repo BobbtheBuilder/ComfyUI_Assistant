@@ -12,13 +12,29 @@ from typing import Any
 
 NODE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(NODE_DIR, "debug.log")
-MAX_EVENTS = 500
-MAX_FILE_BYTES = 2 * 1024 * 1024
-MAX_FIELD_CHARS = 1500
 SCHEMA_VERSION = 1
 
 _lock = threading.RLock()
-_events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
+_events: deque[dict[str, Any]] | None = None
+
+
+def _limit(name: str, default: int = 0) -> int:
+    try:
+        try:
+            from .config_store import CONFIG_STORE
+        except ImportError:
+            from config_store import CONFIG_STORE
+        return CONFIG_STORE.get_limit(name, default)
+    except Exception:
+        return default
+
+
+def _buffer() -> deque[dict[str, Any]]:
+    global _events
+    if _events is None:
+        size = _limit("debug_max_events", 100000)
+        _events = deque() if size <= 0 else deque(maxlen=size)
+    return _events
 
 
 def _scrub_url(match: re.Match[str]) -> str:
@@ -46,7 +62,8 @@ def scrub_text(value: Any) -> str:
     text = str(value if value is not None else "")
     for pattern, replacement in _REDACTIONS:
         text = pattern.sub(replacement, text)
-    return text[:MAX_FIELD_CHARS]
+    limit = _limit("debug_max_field_chars", 0)
+    return text[:limit] if limit and limit > 0 else text
 
 
 def scrub(value: Any, depth: int = 0) -> Any:
@@ -81,7 +98,8 @@ def _iso(timestamp: float | None = None) -> str:
 
 def _write_file(line: str) -> None:
     try:
-        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > MAX_FILE_BYTES:
+        size_limit = _limit("debug_max_file_bytes", 0)
+        if size_limit and size_limit > 0 and os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > size_limit:
             backup = LOG_PATH + ".1"
             if os.path.exists(backup):
                 os.remove(backup)
@@ -103,7 +121,7 @@ def log(category: str, event: str, level: str = "info", **data: Any) -> None:
         "data": scrub(data),
     }
     with _lock:
-        _events.append(record)
+        _buffer().append(record)
     _write_file(json.dumps(record, ensure_ascii=True))
 
 
@@ -116,7 +134,7 @@ def debug_log(*args: Any, **kwargs: Any) -> None:
 
 def clear() -> None:
     with _lock:
-        _events.clear()
+        _buffer().clear()
     try:
         if os.path.exists(LOG_PATH):
             os.remove(LOG_PATH)
@@ -129,7 +147,7 @@ def clear() -> None:
 
 def snapshot() -> dict[str, Any]:
     with _lock:
-        events = list(_events)
+        events = list(_buffer())
     return {"enabled": _enabled(), "events": events}
 
 
@@ -231,7 +249,7 @@ def _memory_summary() -> dict[str, Any]:
 
 def report(client: Any = None) -> dict[str, Any]:
     with _lock:
-        events = list(_events)
+        events = list(_buffer())
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _iso(),
