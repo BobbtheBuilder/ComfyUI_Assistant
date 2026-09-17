@@ -51,6 +51,12 @@ class ConfigStoreTest(unittest.TestCase):
         self.assertFalse(snapshot["thinking"]["enabled"])
         self.assertFalse(self.store.resolved()["thinking"]["enabled"])
 
+    def test_experience_defaults(self):
+        config = self.store.resolved()["experience"]
+        self.assertTrue(config["enabled"])
+        self.assertTrue(config["ask_approval"])
+        self.assertEqual(config["recall_limit"], 3)
+
     def test_update_does_not_keep_caller_owned_values(self):
         values = {"kb": {"embed": {"model": "original"}}}
         self.store.update(values)

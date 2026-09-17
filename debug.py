@@ -198,6 +198,7 @@ def _config_summary() -> dict[str, Any]:
             "debug": config.get("debug", {}),
             "console": config.get("console", {}),
             "unload": config.get("unload", {}),
+            "experience": config.get("experience", {}),
         },
     }
 

@@ -7,6 +7,7 @@ const RUNTIME_RULES =
   "Never invent, infer, or guess image contents from the workflow. " +
   "When the user corrects a mistake or states a lasting preference, call remember_lesson with a short, general rule; " +
   "first check the lessons already shown above (or call search_memory), and refine an existing rule instead of saving a duplicate. " +
+  "Previously approved workflow examples are reference evidence, not compatibility rules; verify their nodes against the current installation before reuse. " +
   "When referring to a workflow node in your replies, include both its number and its current workflow title, " +
   'for example: #12 — "Main Sampler". Use the title shown on the canvas, including custom names; ' +
   "use the node type only when no title is available. If you do not know the title, look it up with " +
@@ -362,6 +363,22 @@ const TOOLS = [
   {
     type: "function",
     function: {
+      name: "recall_experience",
+      description:
+        "Look up past workflow fragments and observed execution errors: what was tried, whether it ran, and whether the user approved the result. Reference evidence only — verify node types against the current installation and do not treat it as a compatibility rule.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Task, node name, or error text to look up" },
+          limit: { type: "integer", description: "Max results, default 5" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "get_console_log",
       description:
         "Read recent ComfyUI server console output (last N lines), optionally only errors/warnings. Use this to diagnose failed runs, missing nodes, or tracebacks.",
@@ -425,6 +442,12 @@ const state = {
   buildTargetResolver: null,
   pendingInjections: [],
   lessonReindexRequested: false,
+  pendingRuns: new Map(),
+  relevantExperiences: [],
+  experienceReindexRequested: false,
+  experience: [],
+  runTaskText: "",
+  runCaptureInstalled: false,
   dom: {},
 };
 
@@ -638,6 +661,30 @@ function buildUi() {
               <button class="ccb-btn ccb-danger" id="ccb-memory-clear">Clear all</button>
             </div>
             <div class="ccb-memory-list" id="ccb-memory-list"></div>
+            <div class="ccb-field">
+              <label>Record workflow experience (runs the assistant edited)</label>
+              <select id="ccb-experience-enabled">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+            <div class="ccb-field">
+              <label>Ask me to approve successful runs</label>
+              <select id="ccb-experience-approval">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+            <div class="ccb-field">
+              <label>Examples recalled per message</label>
+              <input id="ccb-experience-limit" type="number" min="1" max="20" />
+            </div>
+            <div class="ccb-row">
+              <button class="ccb-btn" id="ccb-experience-refresh">Refresh experience</button>
+              <button class="ccb-btn ccb-danger" id="ccb-experience-clear">Clear all</button>
+            </div>
+            <div class="ccb-kb-status" id="ccb-experience-status">Experience: -</div>
+            <div class="ccb-memory-list" id="ccb-experience-list"></div>
             <div class="ccb-field">
               <label>Always include last output image</label>
               <select id="ccb-images-output">
@@ -856,6 +903,10 @@ function wireUi() {
   root.querySelector("#ccb-memory-embed-refresh").addEventListener("click", () => {
     refreshEmbedModels("", "#ccb-memory-embed-model");
   });
+  root.querySelector("#ccb-experience-refresh").addEventListener("click", () => loadExperiences());
+  root.querySelector("#ccb-experience-clear").addEventListener("click", () =>
+    updateExperience({ action: "clear" }).catch((error) => appendNotice(error.message)),
+  );
   root.querySelector("#ccb-memory-clear").addEventListener("click", () =>
     updateMemory({ action: "clear" }).catch((error) => appendNotice(error.message)),
   );
@@ -2069,6 +2120,8 @@ async function executeTool(name, args) {
       return rememberLesson(args.text, args.tags, args.pinned === true);
     case "search_memory":
       return searchMemory(args.query, args.limit);
+    case "recall_experience":
+      return recallExperience(args.query, args.limit);
     case "get_console_log":
       return getConsoleLog(args.lines, args.level);
     case "web_search":
@@ -2164,7 +2217,9 @@ async function submitInput() {
     state.runArranged = false;
     state.fixPasses = 0;
     state.correctionHint = state.config?.memory?.auto_detect !== false && CORRECTION_RE.test(text);
+    state.runTaskText = text;
     await refreshRelevantLessons(text);
+    await refreshRelevantExperiences(text);
     await prepareContext();
     if (!state.cancelled) await runAgentWithFixups();
   } catch (error) {
@@ -2361,6 +2416,7 @@ function isLookupTool(name) {
     case "get_selection":
     case "validate_workflow":
     case "search_memory":
+    case "recall_experience":
     case "get_console_log":
     case "web_search":
     case "search_docs":
@@ -2478,6 +2534,7 @@ function selectionContext() {
 function buildMessages() {
   const context = state.requestActive ? state.runSelectionContext : selectionContext();
   const lessons = lessonsContext();
+  const experiences = experienceContext();
   const hint = state.correctionHint
     ? "The user's latest message sounds like a correction. If they are correcting a mistake, call remember_lesson with a short general rule before continuing."
     : "";
@@ -2503,7 +2560,7 @@ function buildMessages() {
   }
   // Volatile context (selection, lessons, hint) goes on the last user turn so the leading
   // system + tools prefix stays byte-stable and the provider can reuse its prompt cache.
-  const volatile = [context, lessons, hint].filter(Boolean).join("\n\n");
+  const volatile = [context, lessons, experiences, hint].filter(Boolean).join("\n\n");
   const systemBase = `${state.config?.system_prompt || ""}\n\n${RUNTIME_RULES}`;
   const system = volatile && lastUserIndex < 0 ? `${systemBase}\n\n${volatile}` : systemBase;
   const prefix = (text) => (volatile ? `${volatile}\n\n${text || ""}` : text || "");
@@ -2817,6 +2874,9 @@ function populateSettings() {
   setValue("#ccb-memory-limit", config.memory?.inject_limit ?? 8);
   setValue("#ccb-memory-embed-enabled", String(config.memory?.embed?.enabled !== false));
   refreshEmbedModels(config.memory?.embed?.model || "", "#ccb-memory-embed-model");
+  setValue("#ccb-experience-enabled", String(config.experience?.enabled !== false));
+  setValue("#ccb-experience-approval", String(config.experience?.ask_approval !== false));
+  setValue("#ccb-experience-limit", config.experience?.recall_limit ?? 3);
   setValue("#ccb-system-prompt", config.system_prompt || "");
   setValue("#ccb-websearch-provider", websearch.provider || "tavily");
   setPlaceholder("#ccb-websearch-key", websearch.api_key_configured ? "\u2022\u2022\u2022 configured" : "not set");
@@ -2937,6 +2997,11 @@ function collectSettings() {
         enabled: get("#ccb-memory-embed-enabled") === "true",
         model: get("#ccb-memory-embed-model"),
       },
+    },
+    experience: {
+      enabled: get("#ccb-experience-enabled") === "true",
+      ask_approval: get("#ccb-experience-approval") === "true",
+      recall_limit: Number(get("#ccb-experience-limit")) || 3,
     },
     debug: {
       enabled: isChecked("#ccb-debug-enabled"),
@@ -3948,6 +4013,302 @@ async function searchMemory(query, limit) {
   return { lessons: (payload.lessons || []).map((lesson) => lesson.text) };
 }
 
+function lastUserTask() {
+  for (let index = state.messages.length - 1; index >= 0; index -= 1) {
+    const message = state.messages[index];
+    if (message.role !== "user" || message.steer || message.synthetic) continue;
+    const content = typeof message.content === "string" ? message.content : "";
+    if (!content || content.startsWith("Tool result for ") || content.startsWith("Follow-up pass")) continue;
+    return content.slice(0, 500);
+  }
+  return "";
+}
+
+function experienceModels(fragment) {
+  const names = new Set();
+  for (const node of fragment.nodes || []) {
+    for (const widget of node.widgets || []) {
+      const value = String(widget.value || "");
+      if (/\.(safetensors|sft|ckpt|gguf|pth|pt|bin)$/i.test(value)) names.add(value);
+    }
+  }
+  return [...names];
+}
+
+function experienceFragment() {
+  const graph = app.graph;
+  if (!graph) return null;
+  const seed = new Set((state.runAddedNodeIds || []).map(String));
+  if (!seed.size) return null;
+  const byId = new Map((graph._nodes || []).map((node) => [String(node.id), node]));
+  const links = Object.values(graph.links || {});
+  const included = new Set(seed);
+  for (const link of links) {
+    const from = String(link.origin_id);
+    const to = String(link.target_id);
+    if (seed.has(from)) included.add(to);
+    if (seed.has(to)) included.add(from);
+  }
+  const nodes = [];
+  for (const id of included) {
+    const node = byId.get(id);
+    if (!node) continue;
+    nodes.push({
+      id: node.id,
+      type: node.type,
+      title: node.title || node.type,
+      mode: node.mode,
+      widgets: (node.widgets || []).slice(0, 12).map((widget) => ({
+        name: widget.name,
+        value: truncate(String(widget.value ?? ""), 200),
+      })),
+    });
+  }
+  if (!nodes.length) return null;
+  const fragmentLinks = links
+    .filter((link) => included.has(String(link.origin_id)) && included.has(String(link.target_id)))
+    .map((link) => ({
+      from: link.origin_id,
+      from_slot: link.origin_slot,
+      to: link.target_id,
+      to_slot: link.target_slot,
+      type: link.type,
+    }));
+  return { nodes, links: fragmentLinks };
+}
+
+function trackRunSubmit(promptId) {
+  if (state.config?.experience?.enabled === false) return;
+  const promptKey = String(promptId || "");
+  if (!promptKey || state.pendingRuns.has(promptKey)) return;
+  const fragment = experienceFragment();
+  if (!fragment) return;
+  state.pendingRuns.set(promptKey, {
+    prompt_id: promptKey,
+    fragment,
+    models: experienceModels(fragment),
+    workflow_key: resolveWorkflowKey() || "",
+    task: state.runTaskText || lastUserTask(),
+  });
+}
+
+function installRunCapture() {
+  if (state.runCaptureInstalled || typeof api.queuePrompt !== "function") return;
+  state.runCaptureInstalled = true;
+  const original = api.queuePrompt.bind(api);
+  api.queuePrompt = async (...args) => {
+    const response = await original(...args);
+    const promptId = response?.prompt_id || response?.promptId;
+    if (promptId) trackRunSubmit(promptId);
+    return response;
+  };
+}
+
+function experienceLine(item) {
+  const nodes = (item.node_types || []).slice(0, 12).join(", ") || "(no nodes)";
+  const status = item.execution_status || item.kind || "";
+  const verdict = item.verdict && item.verdict !== "none" ? ` \u00b7 user ${item.verdict}` : "";
+  const failure = item.failure_kind ? ` \u00b7 ${item.failure_kind}` : "";
+  const models = (item.models || []).slice(0, 4).join(", ");
+  const changed = (item.revalidate || []).filter((node) => !node.installed || node.schema_changed);
+  const caveat = changed.length
+    ? ` \u00b7 WARNING: ${changed
+        .map((node) => (node.installed ? `${node.type} schema changed` : `${node.type} not installed`))
+        .join("; ")}`
+    : "";
+  const head = `- ${truncate(item.task || "(no task)", 160)}: ${nodes} [${status}${failure}${verdict}]`;
+  const tail = models ? ` models: ${models}` : "";
+  const error = item.error ? ` error: ${truncate(item.error, 160)}` : "";
+  return head + tail + error + caveat;
+}
+
+function experienceContext() {
+  if (state.config?.experience?.enabled === false) return "";
+  const items = state.relevantExperiences;
+  if (!items.length) return "";
+  const lines = items.map(experienceLine).filter(Boolean);
+  if (!lines.length) return "";
+  return (
+    "Previously approved examples (reference only \u2014 verify node types against the current " +
+    "installation; conditions and versions may differ; not a compatibility rule):\n" + lines.join("\n")
+  );
+}
+
+async function refreshRelevantExperiences(task) {
+  if (state.config?.experience?.enabled === false) {
+    state.relevantExperiences = [];
+    return;
+  }
+  const limit = Number(state.config?.experience?.recall_limit) || 3;
+  try {
+    const response = await api.fetchApi("/chatbot/experience/relevant", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task: task || "", limit }),
+    });
+    const payload = await response.json();
+    state.relevantExperiences = Array.isArray(payload.experiences) ? payload.experiences : [];
+  } catch {
+    state.relevantExperiences = [];
+  }
+}
+
+async function recallExperience(query, limit) {
+  const response = await api.fetchApi("/chatbot/experience/relevant", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task: query, limit: limit || 5 }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  return { experiences: (payload.experiences || []).map(experienceLine) };
+}
+
+async function completeRun(entry, status, detail) {
+  state.pendingRuns.delete(entry.prompt_id);
+  if (state.config?.experience?.enabled === false) return;
+  const kind = status === "success" ? "success" : "failure";
+  const errorText = detail
+    ? [detail.exception_type, detail.exception_message, detail.node_type ? `node:${detail.node_type}` : ""]
+        .filter(Boolean)
+        .join(": ")
+    : "";
+  try {
+    const response = await api.fetchApi("/chatbot/experience", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kind,
+        task: entry.task,
+        workflow_key: entry.workflow_key,
+        prompt_id: entry.prompt_id,
+        fragment: entry.fragment,
+        models: entry.models,
+        execution_status: status,
+        error: errorText,
+        node_errors: entry.node_errors,
+      }),
+    });
+    const payload = await response.json();
+    const id = payload?.result?.id;
+    if (kind === "success" && id && state.config?.experience?.ask_approval !== false) {
+      void askRunApproval(id, entry);
+    }
+  } catch {
+    /* experience capture is best-effort */
+  }
+}
+
+async function askRunApproval(id, entry) {
+  const answer = await appendChatCard("Did this run give the result you wanted?", [
+    { label: "Approve", value: "approved", class: "ccb-primary" },
+    { label: "Not quite", value: "rejected" },
+    { label: "Skip", value: "skip" },
+  ]);
+  if (!answer || answer === "skip") return;
+  try {
+    await api.fetchApi("/chatbot/experience/verdict", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id,
+        verdict: answer,
+        failure_kind: answer === "rejected" ? "unsatisfactory" : "",
+      }),
+    });
+    void loadExperiences();
+  } catch {
+    /* best effort */
+  }
+}
+
+function updateExperienceStatus(embedding) {
+  const element = state.dom.root?.querySelector("#ccb-experience-status");
+  if (!element) return;
+  if (!embedding) {
+    element.textContent = "Experience: -";
+    return;
+  }
+  const parts = [`${embedding.experiences} record(s)`, `${embedding.embedded} embedded`];
+  if (embedding.model) parts.push(embedding.model);
+  if (embedding.error) parts.push(`error: ${embedding.error}`);
+  element.textContent = `Experience: ${parts.join(" \u00b7 ")}`;
+}
+
+async function reindexExperiences() {
+  try {
+    const response = await api.fetchApi("/chatbot/experience/reindex", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const payload = await response.json();
+    updateExperienceStatus(payload.embedding || null);
+  } catch {
+    /* best effort */
+  }
+}
+
+async function loadExperiences() {
+  let embedding = null;
+  try {
+    const response = await api.fetchApi("/chatbot/experience");
+    const payload = await response.json();
+    state.experience = Array.isArray(payload.experiences) ? payload.experiences : [];
+    embedding = payload.embedding || null;
+  } catch {
+    state.experience = [];
+  }
+  updateExperienceStatus(embedding);
+  if (!state.experienceReindexRequested && state.config?.experience?.enabled !== false
+      && state.config?.memory?.embed?.enabled !== false) {
+    state.experienceReindexRequested = true;
+    void reindexExperiences();
+  }
+  renderExperienceList();
+}
+
+function renderExperienceList() {
+  const container = state.dom.root?.querySelector("#ccb-experience-list");
+  if (!container) return;
+  container.innerHTML = "";
+  for (const item of state.experience) {
+    const row = el("div", { class: "ccb-lesson" });
+    const text = el("div", {
+      class: "ccb-lesson-text",
+      text: `#${item.id} ${item.kind}${item.failure_kind ? `/${item.failure_kind}` : ""} \u00b7 ${item.verdict}`,
+    });
+    const meta = el("div", {
+      class: "ccb-lesson-meta",
+      text: truncate(item.task || item.error || "(no task)", 120),
+    });
+    const actions = el("div", { class: "ccb-lesson-actions" });
+    const enabled = el("button", { class: "ccb-btn", text: item.enabled ? "Disable" : "Enable" });
+    enabled.addEventListener("click", () =>
+      updateExperience({ action: item.enabled ? "disable" : "enable", id: item.id }).catch((error) =>
+        appendNotice(error.message)));
+    const remove = el("button", { class: "ccb-btn ccb-danger", text: "Delete" });
+    remove.addEventListener("click", () =>
+      updateExperience({ action: "delete", id: item.id }).catch((error) => appendNotice(error.message)));
+    actions.append(enabled, remove);
+    row.append(text, meta, actions);
+    container.appendChild(row);
+  }
+}
+
+async function updateExperience(payload) {
+  const response = await api.fetchApi("/chatbot/experience/manage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  state.experience = result.experiences || [];
+  renderExperienceList();
+  return result;
+}
+
 async function getConsoleLog(lines, level) {
   const response = await api.fetchApi("/chatbot/console", {
     method: "POST",
@@ -4069,9 +4430,24 @@ app.registerExtension({
         state.lastOutputs = state.lastOutputs.slice(-20);
       }
     });
-    api.addEventListener("execution_start", () => {
+    api.addEventListener("execution_start", ({ detail }) => {
+      const promptId = String(detail?.prompt_id || "");
+      if (promptId && !state.pendingRuns.has(promptId)) trackRunSubmit(promptId);
       if (state.config?.unload?.on_execute !== false) unloadLlm(true);
     });
+    api.addEventListener("execution_success", ({ detail }) => {
+      const entry = state.pendingRuns.get(String(detail?.prompt_id || ""));
+      if (entry) void completeRun(entry, "success", null);
+    });
+    api.addEventListener("execution_error", ({ detail }) => {
+      const entry = state.pendingRuns.get(String(detail?.prompt_id || ""));
+      if (entry) void completeRun(entry, "error", detail);
+    });
+    api.addEventListener("execution_interrupted", ({ detail }) => {
+      const entry = state.pendingRuns.get(String(detail?.prompt_id || ""));
+      if (entry) void completeRun(entry, "interrupted", detail);
+    });
+    installRunCapture();
     state.sessionKey = resolveWorkflowKey();
     // Until the first history read completes, these empty messages are a
     // placeholder, not a user-cleared conversation that may be saved.
@@ -4082,6 +4458,7 @@ app.registerExtension({
       await loadConfig();
       await loadHistory();
       await loadLessons();
+      await loadExperiences();
       await refreshRelevantLessons("");
       refreshModels();
     } catch (error) {

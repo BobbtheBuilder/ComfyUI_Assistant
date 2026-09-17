@@ -113,6 +113,11 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "lines": 500,
     },
+    "experience": {
+        "enabled": True,
+        "ask_approval": True,
+        "recall_limit": 3,
+    },
     "debug": {
         "enabled": False,
     },

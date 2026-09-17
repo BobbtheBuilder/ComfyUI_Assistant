@@ -74,6 +74,18 @@ class RouteValidationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 400)
         self.config.resolved.assert_not_called()
 
+    async def test_experience_record_scrubs_and_stores(self):
+        self.config.resolved.return_value = {}
+        with patch.object(self.routes_module.experience, "add_experience",
+                          return_value={"id": 3, "kind": "failure", "failure_kind": "oom"}) as add, \
+                patch.object(self.routes_module, "_experience_vector", new=AsyncMock(return_value=None)):
+            request = Mock(json=AsyncMock(return_value={"kind": "failure", "error": "boom sk-abcdef123456"}))
+            response = await self.handler("experience_record")(request)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.text)["result"]["id"], 3)
+        stored = add.call_args.args[0]
+        self.assertNotIn("sk-abcdef123456", stored["error"])
+
     async def test_memory_add_surfaces_merge_result(self):
         self.config.resolved.return_value = {}
         merged = {"id": 7, "updated": True, "merged": True, "similarity": 0.8}

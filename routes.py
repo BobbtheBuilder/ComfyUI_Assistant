@@ -8,7 +8,7 @@ from typing import Any, Mapping
 from aiohttp import web
 from server import PromptServer
 
-from . import console, debug, kb, memory, providers, websearch
+from . import console, debug, experience, kb, memory, providers, websearch
 from .config_store import CONFIG_STORE
 
 routes = PromptServer.instance.routes
@@ -61,6 +61,31 @@ async def _lesson_vector(config: Mapping[str, Any], text: str) -> list[float] | 
         vectors = await providers.embed(config, [text], model)
     except Exception as exc:
         await asyncio.to_thread(memory.set_embed_error, str(exc))
+        return None
+    return vectors[0] if vectors else None
+
+
+def _experience_embed_text(record: Mapping[str, Any]) -> str:
+    parts = [str(record.get("task") or ""), " ".join(experience._node_types(record.get("fragment")))]
+    if record.get("error"):
+        parts.append(str(record["error"]))
+    return " ".join(part for part in parts if part).strip()
+
+
+async def _experience_vector(config: Mapping[str, Any], text: str) -> list[float] | None:
+    """Experience retrieval reuses the memory embedding settings."""
+    embed = _memory_embed_settings(config)
+    text = str(text or "").strip()
+    if embed is None or not text:
+        return None
+    model = await providers.resolve_embedding_model(config, str(embed.get("model") or ""))
+    if not model:
+        return None
+    await asyncio.to_thread(experience.ensure_embed_model, model)
+    try:
+        vectors = await providers.embed(config, [text], model)
+    except Exception as exc:
+        await asyncio.to_thread(experience.set_embed_error, str(exc))
         return None
     return vectors[0] if vectors else None
 
@@ -412,6 +437,146 @@ async def memory_reindex(_request: web.Request) -> web.Response:
             status=502,
         )
     return web.json_response({"indexed": indexed, "embedding": await asyncio.to_thread(memory.vector_stats)})
+
+
+@routes.get("/chatbot/experience")
+async def experience_list(_request: web.Request) -> web.Response:
+    experiences = await asyncio.to_thread(experience.list_experiences)
+    embedding = await asyncio.to_thread(experience.vector_stats)
+    return web.json_response({"experiences": experiences, "embedding": embedding})
+
+
+@routes.post("/chatbot/experience")
+async def experience_record(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    fragment = payload.get("fragment") if isinstance(payload.get("fragment"), dict) else {}
+    record = {
+        "kind": "success" if str(payload.get("kind") or "") == "success" else "failure",
+        "task": str(payload.get("task") or ""),
+        "workflow_key": str(payload.get("workflow_key") or ""),
+        "prompt_id": str(payload.get("prompt_id") or ""),
+        "fragment": fragment,
+        "models": payload.get("models") if isinstance(payload.get("models"), list) else [],
+        "execution_status": str(payload.get("execution_status") or ""),
+        "error": debug.scrub_text(payload.get("error") or ""),
+        "failure_kind": str(payload.get("failure_kind") or ""),
+        "node_errors": payload.get("node_errors"),
+        "source": "run",
+    }
+    try:
+        result = await asyncio.to_thread(experience.add_experience, record)
+    except (TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    vector = await _experience_vector(_effective_config(payload), _experience_embed_text(record))
+    if vector is not None:
+        await asyncio.to_thread(experience.set_vector, result["id"], vector)
+    return web.json_response({"result": result})
+
+
+@routes.post("/chatbot/experience/verdict")
+async def experience_verdict(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    try:
+        ok = await asyncio.to_thread(
+            experience.update_verdict,
+            int(payload["id"]),
+            str(payload.get("verdict") or ""),
+            str(payload.get("note") or ""),
+            str(payload.get("failure_kind") or ""),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response({"ok": ok})
+
+
+@routes.post("/chatbot/experience/manage")
+async def experience_manage(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    action = str(payload.get("action") or "")
+    try:
+        if action == "delete":
+            await asyncio.to_thread(experience.delete_experience, int(payload["id"]))
+        elif action in ("enable", "disable"):
+            await asyncio.to_thread(experience.set_enabled, int(payload["id"]), action == "enable")
+        elif action == "clear":
+            await asyncio.to_thread(experience.clear_experiences)
+        else:
+            return web.json_response({"error": f"Unknown action: {action}"}, status=400)
+    except (KeyError, TypeError, ValueError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    experiences = await asyncio.to_thread(experience.list_experiences)
+    return web.json_response({"ok": True, "experiences": experiences})
+
+
+@routes.post("/chatbot/experience/search")
+async def experience_search(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    query = str(payload.get("query") or "")
+    vector = await _experience_vector(_effective_config(payload), query)
+    results = await asyncio.to_thread(experience.search, query, int(payload.get("limit") or 8), vector)
+    return web.json_response({"experiences": results})
+
+
+@routes.post("/chatbot/experience/relevant")
+async def experience_relevant(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    task = str(payload.get("task") or payload.get("query") or "")
+    vector = await _experience_vector(_effective_config(payload), task)
+    results = await asyncio.to_thread(experience.relevant, task, int(payload.get("limit") or 3), vector)
+    for item in results:
+        item["revalidate"] = await asyncio.to_thread(
+            experience.revalidate, item.get("fragment"), item.get("pack_fingerprints")
+        )
+    return web.json_response({"experiences": results})
+
+
+@routes.post("/chatbot/experience/reindex")
+async def experience_reindex(_request: web.Request) -> web.Response:
+    config = CONFIG_STORE.resolved()
+    if _memory_embed_settings(config) is None:
+        return web.json_response(
+            {"indexed": 0, "reason": "disabled", "embedding": await asyncio.to_thread(experience.vector_stats)}
+        )
+    embed = config.get("memory", {}).get("embed", {}) or {}
+    model = await providers.resolve_embedding_model(config, str(embed.get("model") or ""))
+    if not model:
+        return web.json_response(
+            {"indexed": 0, "reason": "no embedding model", "embedding": await asyncio.to_thread(experience.vector_stats)}
+        )
+    await asyncio.to_thread(experience.ensure_embed_model, model)
+    pending = await asyncio.to_thread(experience.pending_experiences)
+    indexed = 0
+    try:
+        for experience_id, text in pending:
+            if not text.strip():
+                continue
+            vectors = await providers.embed(config, [text], model)
+            if vectors and vectors[0]:
+                await asyncio.to_thread(experience.set_vector, experience_id, vectors[0])
+                indexed += 1
+        await asyncio.to_thread(experience.set_embed_error, "")
+    except Exception as exc:
+        await asyncio.to_thread(experience.set_embed_error, str(exc))
+        return web.json_response(
+            {"indexed": indexed, "error": str(exc), "embedding": await asyncio.to_thread(experience.vector_stats)},
+            status=502,
+        )
+    return web.json_response({"indexed": indexed, "embedding": await asyncio.to_thread(experience.vector_stats)})
 
 
 @routes.post("/chatbot/debug/report")

@@ -216,6 +216,9 @@ messages show with a `↪` marker. To stop entirely, use **Cancel**.
 | Auto-compact when over budget | On | Summarize older turns to fit. |
 | Keep last messages verbatim | 12 | How many recent messages stay untouched. |
 | Use saved lessons / auto-detect corrections / inject limit | On / On / 8 | Memory behavior. |
+| Record workflow experience (experimental) | On | Store approved workflow fragments and observed execution errors for the runs the assistant edited, and offer them as reference examples. |
+| Ask me to approve successful runs (experimental) | On | After a successful run of an assistant-edited fragment, ask whether the result was what you wanted. |
+| Examples recalled per message (experimental) | 3 | How many experience examples are injected per message. |
 | Debug | Off | Record a privacy-safe diagnostic log. |
 
 ## Files and data
@@ -317,6 +320,24 @@ Bug reports, provider test results, and feature ideas are welcome:
 https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 ## Changelog
+
+### 0.4.6 (experimental — not on main)
+
+> This lives only on the `experimental/experience-memory` branch; `main` (0.4.5) is the stable
+> fallback. Nothing here is published to the registry.
+
+- **Workflow experience memory** (separate from preference lessons): records a compact fragment
+  (assistant-edited nodes + their 1-hop neighbours, links, model files) against the exact
+  submitted run (prompt id captured at queue time, not by reading the canvas at completion).
+- Stores **execution status** and **your verdict** separately, and classifies failures
+  (`missing_file`, `oom`, `invalid_connection`, `runtime_error`, `unsatisfactory`) so an
+  out-of-memory run never looks like an incompatible node combination.
+- **Recall as examples, not rules**: approved fragments (and relevant failures) are offered with a
+  re-validation against the current installation ("node not installed / schema changed — verify")
+  and an explicit "reference only, not a compatibility rule" caveat; a `recall_experience` tool
+  covers on-demand lookups.
+- No auto-promotion, no LLM enrichment, and no changes to the knowledge base.
+- New Settings → Experience section (record, ask-approval, recall limit, list, re-embed).
 
 ### 0.4.5
 
