@@ -5,7 +5,8 @@ const RUNTIME_RULES =
   "Runtime rule: you can only see images that are attached to a message and reported as [N image(s) attached]. " +
   "If the user asks about an image and none is attached, say you cannot see it and ask them to attach it. " +
   "Never invent, infer, or guess image contents from the workflow. " +
-  "When the user corrects a mistake or states a lasting preference, call remember_lesson with a short, general rule. " +
+  "When the user corrects a mistake or states a lasting preference, call remember_lesson with a short, general rule; " +
+  "first check the lessons already shown above (or call search_memory), and refine an existing rule instead of saving a duplicate. " +
   "When referring to a workflow node in your replies, include both its number and its current workflow title, " +
   'for example: #12 — "Main Sampler". Use the title shown on the canvas, including custom names; ' +
   "use the node type only when no title is available. If you do not know the title, look it up with " +
@@ -423,6 +424,7 @@ const state = {
   workflowTestCancel: false,
   buildTargetResolver: null,
   pendingInjections: [],
+  lessonReindexRequested: false,
   dom: {},
 };
 
@@ -609,6 +611,21 @@ function buildUi() {
               <label>Lessons injected per message</label>
               <input id="ccb-memory-limit" type="number" min="1" max="30" />
             </div>
+            <div class="ccb-field">
+              <label>Semantic lesson search (embeddings)</label>
+              <select id="ccb-memory-embed-enabled">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+            <div class="ccb-field">
+              <label>Lesson embedding model</label>
+              <div class="ccb-row">
+                <select id="ccb-memory-embed-model"></select>
+                <button class="ccb-btn" id="ccb-memory-embed-refresh">Refresh</button>
+              </div>
+            </div>
+            <div class="ccb-kb-status" id="ccb-memory-status">Memory: -</div>
             <div class="ccb-field">
               <label>Memory</label>
               <div class="ccb-row">
@@ -836,6 +853,9 @@ function wireUi() {
     }
   });
   root.querySelector("#ccb-memory-refresh").addEventListener("click", () => loadLessons());
+  root.querySelector("#ccb-memory-embed-refresh").addEventListener("click", () => {
+    refreshEmbedModels("", "#ccb-memory-embed-model");
+  });
   root.querySelector("#ccb-memory-clear").addEventListener("click", () =>
     updateMemory({ action: "clear" }).catch((error) => appendNotice(error.message)),
   );
@@ -2795,6 +2815,8 @@ function populateSettings() {
   setValue("#ccb-memory-enabled", String(config.memory?.enabled !== false));
   setValue("#ccb-memory-autodetect", String(config.memory?.auto_detect !== false));
   setValue("#ccb-memory-limit", config.memory?.inject_limit ?? 8);
+  setValue("#ccb-memory-embed-enabled", String(config.memory?.embed?.enabled !== false));
+  refreshEmbedModels(config.memory?.embed?.model || "", "#ccb-memory-embed-model");
   setValue("#ccb-system-prompt", config.system_prompt || "");
   setValue("#ccb-websearch-provider", websearch.provider || "tavily");
   setPlaceholder("#ccb-websearch-key", websearch.api_key_configured ? "\u2022\u2022\u2022 configured" : "not set");
@@ -2911,6 +2933,10 @@ function collectSettings() {
       enabled: get("#ccb-memory-enabled") === "true",
       auto_detect: get("#ccb-memory-autodetect") === "true",
       inject_limit: Number(get("#ccb-memory-limit")) || 8,
+      embed: {
+        enabled: get("#ccb-memory-embed-enabled") === "true",
+        model: get("#ccb-memory-embed-model"),
+      },
     },
     debug: {
       enabled: isChecked("#ccb-debug-enabled"),
@@ -2962,8 +2988,8 @@ function setModelOptions(models, selected) {
   select.value = values.includes(selected) ? selected : values[0];
 }
 
-async function refreshEmbedModels(selected = "") {
-  const select = state.dom.root?.querySelector("#ccb-kb-embed-model");
+async function refreshEmbedModels(selected = "", selector = "#ccb-kb-embed-model") {
+  const select = state.dom.root?.querySelector(selector);
   if (!select) return;
   try {
     const response = await api.fetchApi("/chatbot/embed_models", {
@@ -3827,13 +3853,47 @@ async function detectContextWindow() {
   debugLog("context", "window", { window: state.contextWindow });
 }
 
+function updateMemoryStatus(embedding) {
+  const element = state.dom.root?.querySelector("#ccb-memory-status");
+  if (!element) return;
+  if (!embedding) {
+    element.textContent = "Memory: -";
+    return;
+  }
+  const parts = [`${embedding.lessons} lesson(s)`, `${embedding.embedded} embedded`];
+  if (embedding.model) parts.push(embedding.model);
+  if (embedding.error) parts.push(`error: ${embedding.error}`);
+  element.textContent = `Memory: ${parts.join(" \u00b7 ")}`;
+}
+
+async function reindexLessons() {
+  try {
+    const response = await api.fetchApi("/chatbot/memory/reindex", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const payload = await response.json();
+    updateMemoryStatus(payload.embedding || null);
+  } catch {
+    /* backfill is best-effort */
+  }
+}
+
 async function loadLessons() {
+  let embedding = null;
   try {
     const response = await api.fetchApi("/chatbot/memory");
     const payload = await response.json();
     state.lessons = Array.isArray(payload.lessons) ? payload.lessons : [];
+    embedding = payload.embedding || null;
   } catch {
     state.lessons = [];
+  }
+  updateMemoryStatus(embedding);
+  if (!state.lessonReindexRequested && state.config?.memory?.embed?.enabled !== false) {
+    state.lessonReindexRequested = true;
+    void reindexLessons();
   }
   renderMemoryList();
 }
@@ -3869,6 +3929,11 @@ async function rememberLesson(text, tags, pinned) {
   state.lessons = payload.lessons || [];
   renderMemoryList();
   await refreshRelevantLessons(text);
+  const result = payload.result || {};
+  if (result.merged) {
+    appendNotice(`Merged into existing lesson #${result.id}.`);
+    return { ok: true, merged: true, id: result.id, remembered: text };
+  }
   return { ok: true, remembered: text };
 }
 
@@ -3944,15 +4009,7 @@ function lessonsContext() {
   if (state.config?.memory?.enabled === false) return "";
   const lessons = state.relevantLessons;
   if (!lessons.length) return "";
-  let total = 0;
-  const lines = [];
-  for (const lesson of lessons) {
-    const line = `- ${lesson.text}${lesson.pinned ? " (always apply)" : ""}`;
-    total += line.length;
-    if (total > 2000) break;
-    lines.push(line);
-  }
-  if (!lines.length) return "";
+  const lines = lessons.map((lesson) => `- ${lesson.text}${lesson.pinned ? " (always apply)" : ""}`);
   return `Lessons learned from past corrections and preferences (follow these):\n${lines.join("\n")}`;
 }
 

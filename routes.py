@@ -39,6 +39,32 @@ def _effective_config(payload: Any) -> dict[str, Any]:
     return config
 
 
+def _memory_embed_settings(config: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    memory_config = config.get("memory") or {}
+    embed = memory_config.get("embed") or {}
+    if memory_config.get("enabled", True) is False or embed.get("enabled", True) is False:
+        return None
+    return embed
+
+
+async def _lesson_vector(config: Mapping[str, Any], text: str) -> list[float] | None:
+    """Best-effort embedding for a lesson or query. Never raises into the request."""
+    embed = _memory_embed_settings(config)
+    text = str(text or "").strip()
+    if embed is None or not text:
+        return None
+    model = await providers.resolve_embedding_model(config, str(embed.get("model") or ""))
+    if not model:
+        return None
+    await asyncio.to_thread(memory.ensure_embed_model, model)
+    try:
+        vectors = await providers.embed(config, [text], model)
+    except Exception as exc:
+        await asyncio.to_thread(memory.set_embed_error, str(exc))
+        return None
+    return vectors[0] if vectors else None
+
+
 @routes.get("/chatbot/config")
 async def get_config(_request: web.Request) -> web.Response:
     return web.json_response({"config": CONFIG_STORE.snapshot(include_secrets=False)})
@@ -286,7 +312,8 @@ async def docs_node(request: web.Request) -> web.Response:
 @routes.get("/chatbot/memory")
 async def memory_list(_request: web.Request) -> web.Response:
     lessons = await asyncio.to_thread(memory.list_lessons)
-    return web.json_response({"lessons": lessons})
+    embedding = await asyncio.to_thread(memory.vector_stats)
+    return web.json_response({"lessons": lessons, "embedding": embedding})
 
 
 @routes.post("/chatbot/memory")
@@ -296,26 +323,33 @@ async def memory_update(request: web.Request) -> web.Response:
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
     action = str(payload.get("action") or "add")
+    config = _effective_config(payload)
     try:
         if action == "add":
+            text = str(payload.get("text") or "")
+            vector = await _lesson_vector(config, text)
             result = await asyncio.to_thread(
                 memory.add_lesson,
-                str(payload.get("text") or ""),
+                text,
                 str(payload.get("tags") or ""),
                 str(payload.get("source") or "user"),
                 bool(payload.get("pinned")),
+                vector,
             )
         elif action == "update":
-            result = {
-                "ok": await asyncio.to_thread(
-                    memory.update_lesson,
-                    int(payload["id"]),
-                    payload.get("text"),
-                    payload.get("tags"),
-                    payload.get("enabled"),
-                    payload.get("pinned"),
-                )
-            }
+            ok = await asyncio.to_thread(
+                memory.update_lesson,
+                int(payload["id"]),
+                payload.get("text"),
+                payload.get("tags"),
+                payload.get("enabled"),
+                payload.get("pinned"),
+            )
+            if ok and payload.get("text"):
+                vector = await _lesson_vector(config, str(payload["text"]))
+                if vector is not None:
+                    await asyncio.to_thread(memory.set_vector, int(payload["id"]), vector)
+            result = {"ok": ok}
         elif action == "delete":
             result = {"ok": await asyncio.to_thread(memory.delete_lesson, int(payload["id"]))}
         elif action == "clear":
@@ -335,9 +369,9 @@ async def memory_search(request: web.Request) -> web.Response:
         payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
-    lessons = await asyncio.to_thread(
-        memory.search, str(payload.get("query") or ""), int(payload.get("limit") or 8)
-    )
+    query = str(payload.get("query") or "")
+    vector = await _lesson_vector(_effective_config(payload), query)
+    lessons = await asyncio.to_thread(memory.search, query, int(payload.get("limit") or 8), vector)
     return web.json_response({"lessons": lessons})
 
 
@@ -347,10 +381,37 @@ async def memory_relevant(request: web.Request) -> web.Response:
         payload = await _json_object(request)
     except json.JSONDecodeError:
         return web.json_response({"error": "Invalid JSON body."}, status=400)
-    lessons = await asyncio.to_thread(
-        memory.relevant, str(payload.get("query") or ""), int(payload.get("limit") or 8)
-    )
+    query = str(payload.get("query") or "")
+    vector = await _lesson_vector(_effective_config(payload), query)
+    lessons = await asyncio.to_thread(memory.relevant, query, int(payload.get("limit") or 8), vector)
     return web.json_response({"lessons": lessons})
+
+
+@routes.post("/chatbot/memory/reindex")
+async def memory_reindex(_request: web.Request) -> web.Response:
+    config = CONFIG_STORE.resolved()
+    if _memory_embed_settings(config) is None:
+        return web.json_response({"indexed": 0, "reason": "disabled", "embedding": await asyncio.to_thread(memory.vector_stats)})
+    model = await providers.resolve_embedding_model(config, str((config.get("memory", {}).get("embed") or {}).get("model") or ""))
+    if not model:
+        return web.json_response({"indexed": 0, "reason": "no embedding model", "embedding": await asyncio.to_thread(memory.vector_stats)})
+    await asyncio.to_thread(memory.ensure_embed_model, model)
+    pending = await asyncio.to_thread(memory.pending_lessons)
+    indexed = 0
+    try:
+        for lesson_id, text in pending:
+            vectors = await providers.embed(config, [text], model)
+            if vectors and vectors[0]:
+                await asyncio.to_thread(memory.set_vector, lesson_id, vectors[0])
+                indexed += 1
+        await asyncio.to_thread(memory.set_embed_error, "")
+    except Exception as exc:
+        await asyncio.to_thread(memory.set_embed_error, str(exc))
+        return web.json_response(
+            {"indexed": indexed, "error": str(exc), "embedding": await asyncio.to_thread(memory.vector_stats)},
+            status=502,
+        )
+    return web.json_response({"indexed": indexed, "embedding": await asyncio.to_thread(memory.vector_stats)})
 
 
 @routes.post("/chatbot/debug/report")

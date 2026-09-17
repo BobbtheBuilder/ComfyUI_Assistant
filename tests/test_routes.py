@@ -8,7 +8,7 @@ import types
 import unittest
 from pathlib import Path
 from typing import Any, Mapping
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp import web
 
@@ -73,3 +73,14 @@ class RouteValidationTest(unittest.IsolatedAsyncioTestCase):
                 response = await self.handler("chat")(Mock(json=AsyncMock(return_value=payload)))
                 self.assertEqual(response.status, 400)
         self.config.resolved.assert_not_called()
+
+    async def test_memory_add_surfaces_merge_result(self):
+        self.config.resolved.return_value = {}
+        merged = {"id": 7, "updated": True, "merged": True, "similarity": 0.8}
+        with patch.object(self.routes_module, "_lesson_vector", new=AsyncMock(return_value=None)), \
+                patch.object(self.routes_module.memory, "add_lesson", return_value=merged), \
+                patch.object(self.routes_module.memory, "list_lessons", return_value=[]):
+            request = Mock(json=AsyncMock(return_value={"action": "add", "text": "a rule"}))
+            response = await self.handler("memory_update")(request)
+        self.assertEqual(response.status, 200)
+        self.assertTrue(json.loads(response.text)["result"]["merged"])

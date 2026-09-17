@@ -75,6 +75,45 @@ class MemoryStoreTest(unittest.TestCase):
             memory.update_lesson(lesson["id"], text="  ")
         self.assertEqual(memory.list_lessons()[0]["text"], "Keep this lesson")
 
+    def test_near_duplicate_merges_into_existing_lesson(self):
+        first = memory.add_lesson(
+            "Avoid using any node with is_api_node=True unless explicitly requested", tags="api"
+        )
+        second = memory.add_lesson(
+            "Do not include any API-enabled nodes (is_api_node=True) unless explicitly requested by the user.",
+            pinned=True,
+        )
+        self.assertTrue(second["merged"])
+        self.assertEqual(first["id"], second["id"])
+        lessons = memory.list_lessons()
+        self.assertEqual(len(lessons), 1)
+        self.assertEqual(lessons[0]["text"], "Avoid using any node with is_api_node=True unless explicitly requested")
+        self.assertTrue(lessons[0]["pinned"])
+        self.assertEqual(lessons[0]["tags"], "api")
+
+    def test_near_duplicate_merges_via_embedding(self):
+        memory.add_lesson("alpha beta gamma delta", vector=[1.0, 0.0])
+        merged = memory.add_lesson("totally unrelated wording zzz", vector=[0.9999, 0.0141])
+        self.assertTrue(merged["merged"])
+        self.assertEqual(len(memory.list_lessons()), 1)
+
+    def test_semantic_search_uses_the_query_vector(self):
+        memory.add_lesson("dark moody lighting", vector=[1.0, 0.0])
+        memory.add_lesson("bright cheerful colors", vector=[0.0, 1.0])
+        results = memory.search("", 8, [0.9, 0.1])
+        self.assertEqual(results[0]["text"], "dark moody lighting")
+
+    def test_vector_dimension_mismatch_is_ignored(self):
+        memory.add_lesson("dark moody lighting", vector=[1.0, 0.0])
+        self.assertEqual(memory.search("", 8, [0.1, 0.2, 0.3]), [])
+
+    def test_relevant_keeps_pinned_and_semantic_hits(self):
+        memory.add_lesson("pinned rule", pinned=True)
+        memory.add_lesson("dark moody lighting", vector=[1.0, 0.0])
+        texts = [item["text"] for item in memory.relevant("", 8, [0.9, 0.1])]
+        self.assertIn("pinned rule", texts)
+        self.assertIn("dark moody lighting", texts)
+
 
 class KnowledgeBaseTest(unittest.TestCase):
     def setUp(self):

@@ -602,6 +602,23 @@ async def embedding_models(config: Mapping[str, Any]) -> list[str]:
     return [model for model in models if any(hint in model.lower() for hint in _EMBED_HINTS)]
 
 
+async def resolve_embedding_model(config: Mapping[str, Any], explicit: str = "") -> str:
+    """Pick an embedding model: the configured one, else an auto-detected candidate."""
+    model = str(explicit or config.get("embed_model") or "").strip()
+    if model:
+        return model
+    try:
+        candidates = await embedding_models(config)
+    except Exception:
+        return ""
+    if not candidates:
+        return ""
+    for candidate in candidates:
+        if "nomic" in candidate.lower():
+            return candidate
+    return candidates[0]
+
+
 def _embedding_vectors(payload: Any) -> list[list[float]]:
     items = payload.get("data", []) if isinstance(payload, Mapping) else []
     ordered = sorted(items, key=lambda item: item.get("index", 0) if isinstance(item, Mapping) else 0)

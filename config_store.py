@@ -33,7 +33,8 @@ DEFAULT_SYSTEM_PROMPT = (
     "in the canvas selection. When you explain how a node or a part of the workflow works, call "
     "highlight_nodes with the ids you are referring to so the user can see them on the canvas. "
     "When the user corrects a mistake or states a lasting preference, call remember_lesson with a "
-    "short, general rule so it is not repeated in future sessions."
+    "short, general rule so it is not repeated in future sessions; check the lessons already provided "
+    "first and refine an existing rule instead of saving a duplicate."
 )
 
 DEFAULT_BASE_URLS = {
@@ -100,6 +101,10 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "auto_detect": True,
         "inject_limit": 8,
+        "embed": {
+            "enabled": True,
+            "model": "",
+        },
     },
     "unload": {
         "on_execute": True,
