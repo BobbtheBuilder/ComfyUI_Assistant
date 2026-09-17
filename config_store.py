@@ -117,6 +117,15 @@ DEFAULTS: dict[str, Any] = {
         "summary_transcript_chars": 0,
         "session_poll_ms": 300,
         "kb_max_file_bytes": 0,
+        # Embedding inputs must fit the embedding model's window; this is a correctness
+        # guard, not a data cap. 0 = auto-detect the model; when the provider reports no
+        # window, embed_fallback_tokens (512, the common RAG default) is used.
+        "embed_max_tokens": 0,
+        "embed_fallback_tokens": 512,
+        "embed_chars_per_token": 4,
+        # 0 = chunk to the model budget; set a value for finer retrieval granularity.
+        "kb_chunk_chars": 0,
+        "kb_chunk_overlap": 150,
         "input_images": 0,
         "carousel_images": 0,
         "recent_outputs": 0,

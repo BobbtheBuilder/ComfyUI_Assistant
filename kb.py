@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -70,6 +71,8 @@ _state: dict[str, Any] = {
     "official_chunks": 0,
     "embedded": 0,
     "embed_model": "",
+    "embed_window_tokens": 0,
+    "embed_window_source": "",
     "embed_error": "",
     "official_fetched_at": 0.0,
     "official_fetched_iso": "",
@@ -212,7 +215,7 @@ def _split_long(text: str, max_chars: int = CHUNK_CHARS, overlap: int = CHUNK_OV
     return pieces
 
 
-def _chunks_for_text(text: str) -> list[tuple[str, str]]:
+def _chunks_for_text(text: str, max_chars: int = CHUNK_CHARS, overlap: int = CHUNK_OVERLAP) -> list[tuple[str, str]]:
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
         return []
@@ -223,9 +226,30 @@ def _chunks_for_text(text: str) -> list[tuple[str, str]]:
             continue
         match = re.match(r"^(#{1,6})\s+(.*)", section)
         heading = match.group(2).strip() if match else ""
-        for piece in _split_long(section):
+        for piece in _split_long(section, max_chars, overlap):
             result.append((heading, piece))
     return result
+
+
+def _effective_chunk_chars() -> tuple[int, int]:
+    """Chunk size/overlap for indexing: an explicit setting, else the embedding budget."""
+    overlap = _limit("kb_chunk_overlap", 150) or 0
+    configured = _limit("kb_chunk_chars", 0)
+    if configured > 0:
+        return configured, overlap
+    try:
+        config, model = _embed_settings()
+        if config is not None:
+            resolved = _resolve_embed_model(config, model)
+            if resolved:
+                _tokens, chars, _source = asyncio.run(_providers_module().embedding_limits(config, resolved))
+                if chars > 0:
+                    return chars, overlap
+    except Exception:
+        pass
+    per_token = _limit("embed_chars_per_token", 4) or 4
+    fallback = _limit("embed_fallback_tokens", 512) or 512
+    return max(1, int(fallback * per_token * 0.9)), overlap
 
 
 def _pack_for_path(path: str, root: str) -> str:
@@ -362,6 +386,7 @@ def index_node_schemas() -> int:
         conn.execute("DELETE FROM chunks WHERE source_kind = 'node'")
         conn.execute("DELETE FROM node_records")
         records = []
+        chunk_chars, chunk_overlap = _effective_chunk_chars()
         total = len(mapping)
         _set_progress("Indexing node schemas", 0, total)
         for index, node_type in enumerate(mapping, start=1):
@@ -381,7 +406,8 @@ def index_node_schemas() -> int:
             pack = _pack_from_module(module)
             display = str(info.get("display_name") or node_type)
             category = str(info.get("category") or "")
-            records.append(("node", node_type, pack, None, "", display, category, content))
+            for _heading, piece in _chunks_for_text(content, chunk_chars, chunk_overlap):
+                records.append(("node", node_type, pack, None, "", display, category, piece))
             if index % 200 == 0 or index == total:
                 _set_progress("Indexing node schemas", index, total)
         _insert_chunks(conn, records)
@@ -437,6 +463,7 @@ def index_examples() -> int:
         conn.execute("DELETE FROM chunks WHERE source_kind = 'example'")
         conn.execute("DELETE FROM node_examples")
         records = []
+        chunk_chars, chunk_overlap = _effective_chunk_chars()
         _set_progress("Indexing example workflows", 0, 0)
         for root in roots:
             for dirpath, dirnames, filenames in os.walk(root):
@@ -463,7 +490,8 @@ def index_examples() -> int:
                                      (example["node_type"], full, json.dumps(example)))
                     pack = _pack_for_path(full, root)
                     title = os.path.splitext(name)[0]
-                    records.append(("example", full, pack, full, "", title, "", summary))
+                    for _heading, piece in _chunks_for_text(summary, chunk_chars, chunk_overlap):
+                        records.append(("example", full, pack, full, "", title, "", piece))
         _insert_chunks(conn, records)
         conn.commit()
         return len(records)
@@ -496,6 +524,12 @@ def index_registry() -> int:
         _init(conn)
         conn.execute("DELETE FROM chunks WHERE source_kind IN ('registry', 'model')")
         records = []
+        chunk_chars, chunk_overlap = _effective_chunk_chars()
+
+        def add(kind, source, pack, path, url, title, content):
+            for _heading, piece in _chunks_for_text(content, chunk_chars, chunk_overlap):
+                records.append((kind, source, pack, path, url, title, "", piece))
+
         _set_progress("Indexing package registry", 0, 0)
 
         pack_list = _load_json(os.path.join(manager, "custom-node-list.json"))
@@ -513,7 +547,7 @@ def index_registry() -> int:
             author = str(pack.get("author") or "").strip()
             if author:
                 content += f"\nAuthor: {author}"
-            records.append(("registry", title or reference, title, None, reference, title, "", content))
+            add("registry", title or reference, title, None, reference, title, content)
 
         node_map = _load_json(os.path.join(manager, "extension-node-map.json"))
         if isinstance(node_map, dict):
@@ -529,7 +563,7 @@ def index_registry() -> int:
                     continue
                 pack = title_aux or reference
                 content = f"Nodes from pack {pack}:\n{', '.join(node_names)}\nRepository: {reference}"
-                records.append(("registry", pack, pack, None, reference, pack, "", content))
+                add("registry", pack, pack, None, reference, pack, content)
 
         model_list = _load_json(os.path.join(manager, "model-list.json"))
         for model in (model_list or {}).get("models", []):
@@ -548,7 +582,7 @@ def index_registry() -> int:
             reference = str(model.get("reference") or model.get("url") or "").strip()
             if reference:
                 content += f"\nReference: {reference}"
-            records.append(("model", name, "", None, reference, name, "", content))
+            add("model", name, "", None, reference, name, content)
 
         _insert_chunks(conn, records)
         conn.commit()
@@ -761,6 +795,14 @@ def index_embeddings() -> int:
         _state["embed_error"] = "No embedding model available for the configured provider."
         return 0
     _state["embed_model"] = model
+    try:
+        window_tokens, budget_chars, window_source = asyncio.run(providers.embedding_limits(config, model))
+    except Exception:
+        window_tokens, budget_chars, window_source = 0, 0, "unknown"
+    _state["embed_window_tokens"] = window_tokens
+    _state["embed_window_source"] = window_source
+    _meta_set("embed_window_tokens", str(window_tokens))
+    _meta_set("embed_window_source", window_source)
 
     conn = _connect()
     try:
@@ -782,7 +824,8 @@ def index_embeddings() -> int:
         done = 0
         for start in range(0, total, EMBED_BATCH):
             batch = pending[start:start + EMBED_BATCH]
-            texts = [str(content) for _, content in batch]
+            # Respect the embedding model's input window; FTS keeps the full chunk.
+            texts = [str(content)[:budget_chars] if budget_chars > 0 else str(content) for _, content in batch]
             try:
                 vectors = asyncio.run(providers.embed(config, texts, model))
             except Exception as exc:
@@ -859,7 +902,12 @@ def _vector_search(conn: sqlite3.Connection, query: str, limit: int, source: str
     if matrix is None:
         return []
     try:
-        vectors = asyncio.run(providers.embed(config, [query], model))
+        _tokens, budget_chars, _source = asyncio.run(providers.embedding_limits(config, model))
+    except Exception:
+        budget_chars = 0
+    query_text = str(query)[:budget_chars] if budget_chars > 0 else str(query)
+    try:
+        vectors = asyncio.run(providers.embed(config, [query_text], model))
     except Exception:
         return []
     if not vectors or not vectors[0]:
@@ -899,6 +947,9 @@ def _refresh_counts() -> None:
             ).fetchone()[0]
         _state["embedded"] = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
         _state["embed_model"] = _meta_get("embed_model")
+        window = _meta_get("embed_window_tokens")
+        _state["embed_window_tokens"] = int(window) if window else 0
+        _state["embed_window_source"] = _meta_get("embed_window_source")
         fetched = _meta_get("official_fetched_at")
         _state["official_fetched_at"] = float(fetched) if fetched else 0.0
         _state["official_fetched_iso"] = _iso(_state["official_fetched_at"])

@@ -614,6 +614,29 @@ async def embedding_models(config: Mapping[str, Any]) -> list[str]:
     return [model for model in models if any(hint in model.lower() for hint in _EMBED_HINTS)]
 
 
+async def embedding_limits(config: Mapping[str, Any], model: str) -> tuple[int, int, str]:
+    """Resolve the embedding input budget: (max tokens, char budget, source).
+
+    Order: explicit ``limits.embed_max_tokens`` -> the model's reported context window ->
+    the configured fallback (512 tokens, the common RAG default). Never drops data; callers
+    chunk or clamp only what is embedded.
+    """
+    limits = config.get("limits") or {}
+    explicit = _positive_int(limits.get("embed_max_tokens"))
+    if explicit:
+        tokens, source = explicit, "manual"
+    else:
+        window = await _cached_context_window(config, model)
+        if window:
+            tokens, source = int(window), "model"
+        else:
+            tokens = _positive_int(limits.get("embed_fallback_tokens")) or 512
+            source = "fallback"
+    per_token = _positive_int(limits.get("embed_chars_per_token")) or 4
+    chars = max(1, int(tokens * per_token * 0.9))
+    return tokens, chars, source
+
+
 async def resolve_embedding_model(config: Mapping[str, Any], explicit: str = "") -> str:
     """Pick an embedding model: the configured one, else an auto-detected candidate."""
     model = str(explicit or config.get("embed_model") or "").strip()

@@ -228,6 +228,16 @@ for every data/retrieval limit). Retrieval counts come from the request, storage
 and pruning is a manual action. The only non-zero defaults are the local ring buffers
 (`debug_max_events`, `console_buffer`) because they live in RAM — set them to `0` if you want
 those unbounded too.
+
+**Embedding budget (model-aware).** Embedding models have a finite input window, and sending
+text past it makes retrieval worse. The assistant therefore reads the embedding model's window
+(LM Studio / Ollama) and chunks/indexes to fit — nothing is dropped from the keyword index; only
+the embedded text is bounded. Settings: `embed_max_tokens` (`0` = auto-detect; set a positive
+value to force), `embed_fallback_tokens` (`512`, the common RAG default, used only when the
+provider reports no window), `embed_chars_per_token` (`4`, a token estimate), `kb_chunk_chars`
+(`0` = chunk to the model budget — set a smaller value for finer retrieval) and
+`kb_chunk_overlap` (`150`). The KB status shows the resolved window and its source
+(model / fallback / manual).
 | Debug | Off | Record a privacy-safe diagnostic log. |
 
 ## Files and data

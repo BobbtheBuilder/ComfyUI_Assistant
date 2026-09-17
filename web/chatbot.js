@@ -3549,6 +3549,9 @@ async function refreshKbStatus() {
       `nodes ${kb.node_chunks ?? 0} \u00b7 packs ${kb.pack_chunks ?? 0} \u00b7 examples ${kb.example_chunks ?? 0} \u00b7 registry ${kb.registry_chunks ?? 0} \u00b7 models ${kb.model_chunks ?? 0}`,
     );
     parts.push(`embedded ${kb.embedded ?? 0}${kb.embed_model ? ` (${kb.embed_model})` : ""}`);
+    if (kb.embed_window_tokens) {
+      parts.push(`embed window ${kb.embed_window_tokens} tokens${kb.embed_window_source ? ` (${kb.embed_window_source})` : ""}`);
+    }
     parts.push(`official: ${kb.official_fetched_iso || "never"}`);
     if (kb.embed_error) parts.push(`embed error: ${kb.embed_error}`);
     if (kb.error) parts.push(`error: ${kb.error}`);

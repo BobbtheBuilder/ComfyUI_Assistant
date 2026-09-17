@@ -73,6 +73,25 @@ class WorkflowSummaryTest(unittest.TestCase):
         self.assertEqual(kb._workflow_summary({"foo": "bar"}), "")
 
 
+class ChunkBudgetTest(unittest.TestCase):
+    def test_long_content_splits_into_bounded_chunks(self):
+        text = "enum(" + ", ".join(f"value_{index}" for index in range(4000)) + ")"
+        pieces = kb._chunks_for_text(text, 500, 50)
+        self.assertGreater(len(pieces), 1)
+        self.assertTrue(all(len(piece) <= 500 for _heading, piece in pieces))
+
+    def test_effective_chunk_chars_uses_the_setting(self):
+        def fake_limit(name, default=0):
+            if name == "kb_chunk_chars":
+                return 400
+            if name == "kb_chunk_overlap":
+                return 60
+            return default
+
+        with patch.object(kb, "_limit", side_effect=fake_limit):
+            self.assertEqual(kb._effective_chunk_chars(), (400, 60))
+
+
 class BuildFingerprintTest(unittest.TestCase):
     def _fingerprint(self, mapping, flags=None, manager="", version=None):
         patches = [

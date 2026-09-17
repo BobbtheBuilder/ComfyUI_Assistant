@@ -69,6 +69,12 @@ async def _lesson_vector(config: Mapping[str, Any], text: str) -> list[float] | 
         return None
     await asyncio.to_thread(memory.ensure_embed_model, model)
     try:
+        _tokens, budget_chars, _source = await providers.embedding_limits(config, model)
+        if budget_chars > 0:
+            text = text[:budget_chars]
+    except Exception:
+        pass
+    try:
         vectors = await providers.embed(config, [text], model)
     except Exception as exc:
         await asyncio.to_thread(memory.set_embed_error, str(exc))
@@ -93,6 +99,12 @@ async def _experience_vector(config: Mapping[str, Any], text: str) -> list[float
     if not model:
         return None
     await asyncio.to_thread(experience.ensure_embed_model, model)
+    try:
+        _tokens, budget_chars, _source = await providers.embedding_limits(config, model)
+        if budget_chars > 0:
+            text = text[:budget_chars]
+    except Exception:
+        pass
     try:
         vectors = await providers.embed(config, [text], model)
     except Exception as exc:

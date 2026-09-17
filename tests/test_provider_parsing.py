@@ -294,6 +294,30 @@ class ConversionHelpersTest(unittest.TestCase):
         self.assertEqual(providers._api_root({"base_url": "http://x/v1"}), "http://x")
 
 
+class EmbeddingLimitsTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        providers._window_cache.clear()
+
+    async def test_explicit_override_wins(self):
+        tokens, chars, source = await providers.embedding_limits(
+            {"limits": {"embed_max_tokens": 1000, "embed_chars_per_token": 4}}, "m"
+        )
+        self.assertEqual((tokens, source), (1000, "manual"))
+        self.assertEqual(chars, int(1000 * 4 * 0.9))
+
+    async def test_detected_model_window_is_used(self):
+        config = {"limits": {}, "provider": "lmstudio", "base_url": "http://x/v1", "model": "embed"}
+        with patch.object(providers, "context_window", new=AsyncMock(return_value=2048)):
+            tokens, _chars, source = await providers.embedding_limits(config, "embed")
+        self.assertEqual((tokens, source), (2048, "model"))
+
+    async def test_fallback_when_provider_reports_no_window(self):
+        config = {"limits": {}, "provider": "openai", "base_url": "http://x/v1", "model": "embed"}
+        with patch.object(providers, "context_window", new=AsyncMock(return_value=None)):
+            tokens, _chars, source = await providers.embedding_limits(config, "embed")
+        self.assertEqual((tokens, source), (512, "fallback"))
+
+
 class ResolvedMaxTokensTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         providers._window_cache.clear()
