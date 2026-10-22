@@ -10,14 +10,14 @@ across sessions.
 
 <img src="screenshot.jpg" alt="The ComfyUI Assistant panel open over the graph editor" width="420">
 
-> **⚠️ Tested with LM Studio only.**
-> The Ollama, OpenAI-compatible, and Anthropic providers are implemented but have **not been tested
-> yet**. If you try one and it works — or breaks — please tell me via
-> [GitHub Issues](https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues). Feedback is very
-> welcome.
+> **Provider testing:** LM Studio is the verified provider. Strata has been user-tested with one
+> server/model; that does not guarantee compatibility with every Strata deployment. Ollama,
+> OpenAI-compatible servers, and Anthropic are implemented, but have not been broadly verified.
+> Please report provider results in [GitHub Issues](https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues).
 
 ## Contents
 
+- [Latest changes on main](#latest-changes-on-main)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -32,6 +32,34 @@ across sessions.
 - [License](#license)
 - [Changelog](#changelog)
 
+## Latest changes on main
+
+Updated 2026-10-22. These changes are on the main branch; no release version is implied.
+
+- **Workflow chats stay with their workflows.** Restored workflows use their workflow IDs, and
+  history, drafts, and requests remain with the owning workflow when you switch tabs. Startup
+  history and knowledge-base work run in the background so they do not hold up opening the panel.
+- **Knowledge indexing resumes and reuses compatible work.** Unchanged sources skip a full
+  re-index, and unfinished embedding work resumes. Full text is split into model-sized pieces so
+  every part remains searchable. Vectors are reused automatically while the embedding identity is
+  unchanged. If the endpoint changes, choose **Reuse** for the same model or **Rebuild** for a full
+  vector rebuild.
+- **Embedding connections can be separate from chat.** Choose an embedding provider, URL, key, and
+  model in Settings. LM Studio, Ollama, and OpenAI-compatible `/embeddings` endpoints are supported.
+  LM Studio and Ollama embedding models unload after 60 seconds by default; set the idle-unload
+  value to `0` to disable that behavior.
+- **Strata is supported.** Set its base URL to the Strata host and port reachable from ComfyUI,
+  ending in `/v1` (for example, `http://<your-strata-host>:<port>/v1`). The host and port depend
+  on your setup.
+- **Slow local requests can wait.** The assistant fetch timeout defaults to `0` (unlimited). A
+  context-overflow retry happens only when the provider states a lower output-token allowance.
+- **Chat controls:** the composer gives the text box the full row, with image and Thinking controls
+  on the left and New/Send on the right. **Compact** and **Restore** are in Settings → Model &
+  context. The Thinking menu sends effort levels only for verified OpenAI `gpt-5.1` models; Strata
+  currently offers Auto because its model metadata does not advertise effort controls.
+- **Independent lookups can run in parallel** and reuse installed-node search data while definitions
+  remain unchanged. Workflow experience memory is also available on main alongside saved lessons.
+
 ## Features
 
 ### Interface
@@ -39,6 +67,7 @@ across sessions.
 - Draggable panel with a streaming chat view, activity log, and error bubbles.
 - **Send** turns into **Cancel** while the model is responding.
 - **New** chat button next to Send.
+- Full-width message box above the image and Thinking controls; New and Send sit at the right.
 - Each workflow keeps its **own chat session**, and sessions switch automatically when you change
   workflows.
 
@@ -76,10 +105,13 @@ across sessions.
 - **Hybrid search**: SQLite FTS5 keyword search fused with **embedding** semantic search (LM Studio /
   Ollama / any OpenAI-compatible `/embeddings`; keyword-only when the provider has no embeddings).
 - Exposed to the model via `search_docs` / `get_node_docs`.
-- Built in the background on first start, updated incrementally afterwards, and re-indexed after a
-  git install. Rebuild/sync/settings in **Settings → Knowledge base**.
-- The index is **compacted automatically** at the end of a rebuild, and the **Compact** button
-  reclaims free space on demand (SQLite `VACUUM`; enables incremental auto-vacuum afterwards).
+- Starts indexing in the background when the assistant opens. Unchanged sources are skipped, and
+  unfinished embedding work resumes on a later build. Use **Settings → Knowledge base → Rebuild**
+  for a full source refresh or **Sync official docs** for official documentation.
+- Embedding fragments keep full-text coverage: content is split into as many model-sized pieces as
+  needed. Vectors are reused automatically when the embedding identity is unchanged. If the endpoint
+  changes, choose **Reuse** for the same model or **Rebuild** for a full vector rebuild.
+- Use **Compact** in **Settings → Knowledge base** to reclaim database space.
 - **The knowledge base is still a work in progress and will keep improving in future versions.**
 
 ### Memory
@@ -90,6 +122,8 @@ across sessions.
 ### Context management
 - Detects the model's context window and summarizes older turns before it overflows, so local
   models keep working in long sessions. No fixed message cap.
+- If a provider reports a context overflow and states a lower output-token allowance, the assistant
+  retries once with that allowance; it does not guess a smaller limit.
 
 ### Selection awareness
 - When you have node(s) selected (including multi-select), the selection is shared with the model, so
@@ -103,16 +137,19 @@ across sessions.
   `git`/`pip` subprocess calls, as the Comfy Registry requires.)
 
 ### Providers
-- LM Studio, Ollama, any OpenAI-compatible endpoint, and Anthropic.
+- LM Studio, Strata, Ollama, OpenAI-compatible endpoints, and Anthropic. Provider compatibility
+  varies by server and model; see [Provider support](#provider-support).
 - Native tool calling, with an inline-JSON action fallback for models that don't support tools.
 - **Unload the LLM when I run a workflow** (Settings, on by default): when a workflow starts, local
   model instances are unloaded to free VRAM (LM Studio via `/api/v1/models/unload`, Ollama via
-  `keep_alive: 0`). A **Unload now** button is next to the setting. Only affects local providers.
+  `keep_alive: 0`). A **Unload now** button is next to the setting. Only affects these local providers.
+- A separate embedding provider and model can power knowledge, lesson, and workflow-experience
+  search. It can point at LM Studio, Ollama, or an OpenAI-compatible `/embeddings` endpoint.
 
 ## Requirements
 
 - ComfyUI (recent) running on Python 3.10+.
-- `git` on your PATH (only needed for installing custom nodes from the UI).
+- `git` is optional; it is needed only if you install this extension by cloning its repository.
 - No extra Python dependencies — the node uses ComfyUI's bundled `aiohttp`.
 - Optional: a Tavily/Brave/SerpAPI API key for web search.
 - Optional: a vision-capable model for image features.
@@ -133,22 +170,27 @@ Manager → *Install via Git URL* → `https://github.com/BobbtheBuilder/ComfyUI
 Then:
 1. Restart ComfyUI.
 2. Hard-refresh the browser (`Ctrl+F5`).
-3. On first start the knowledge base builds in the background (it downloads ~9 MB of official docs);
-   this can take a few minutes. Watch progress in **Settings → Knowledge Base**.
+3. When the assistant opens, knowledge indexing starts in the background. Watch progress in
+   **Settings → Knowledge Base**; it can continue while you use chat and resumes unfinished embedding
+   work on a later build after a restart.
 
 ## Setup
 
 1. Click the chat bubble and open the **Settings** tab.
-2. Pick a **provider**, set the **base URL** (defaults are filled in) and an **API key** if your
+2. Pick a **provider**, set the **base URL** (provider defaults are filled in) and an **API key** if your
    provider needs one.
 3. Click **Refresh** to load the model list, choose a **model**, and press **Save**.
 4. Optional: set a **web search** provider (Tavily, Brave, or SerpAPI) and its key.
+5. Optional: under **Embedding connection**, choose a separate provider, base URL, key, and model.
+   The default uses the chat connection. Use an endpoint that exposes `/embeddings`; the current
+   Strata server may not provide that endpoint.
 
 Default base URLs:
 
 | Provider | Base URL |
 | --- | --- |
 | LM Studio | `http://127.0.0.1:1234/v1` |
+| Strata | `http://<your-strata-host>:<port>/v1` (use the host and port reachable from ComfyUI) |
 | Ollama | `http://127.0.0.1:11434/v1` |
 | OpenAI-compatible | `https://api.openai.com/v1` |
 | Anthropic | `https://api.anthropic.com` |
@@ -157,12 +199,13 @@ Default base URLs:
 
 | Provider | Status | Notes |
 | --- | --- | --- |
-| **LM Studio** | ✅ Tested | Models list, streaming, native tool calling, vision, context window. |
-| Ollama | ⚠️ Untested | Uses the OpenAI-compatible `/v1` endpoint; vision/context via `/api/show`. |
-| OpenAI-compatible | ⚠️ Untested | Any server exposing `/chat/completions` and `/models`. |
-| Anthropic | ⚠️ Untested | Messages API with tool use and image blocks. |
+| **LM Studio** | Verified | Models list, streaming, native tool calling, vision, and context window. |
+| **Strata** | User-tested | Tested with one server/model; other deployments and models may differ. Use the server's reachable host and `/v1` API path. |
+| Ollama | Implemented; not broadly verified | Uses the OpenAI-compatible `/v1` endpoint; vision/context via `/api/show`. |
+| OpenAI-compatible | Implemented; not broadly verified | Server must support the endpoints and features you use. |
+| Anthropic | Implemented; not broadly verified | Messages API with tool use and image blocks. |
 
-If you test an untested provider, please open an issue with what worked and what didn't:
+If you test another provider or model, please open an issue with what worked and what didn't:
 https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 ## Usage
@@ -177,8 +220,9 @@ Ask in plain language, for example:
 - "Which node pack adds face restoration? Give me the repo URL and how to install it."
 - "You used the wrong sampler last time — don't do that again." *(records a lesson)*
 
-The assistant calls tools as needed; you'll see each call in the activity log. Destructive actions
-(remove node, install a pack) ask for confirmation.
+The assistant calls tools as needed; you'll see each call in the activity log. Removing a node asks
+for confirmation. For an uninstalled custom-node pack, the assistant recommends its repository and
+installation steps; you install it yourself through ComfyUI-Manager or your usual process.
 
 While the assistant is working you can **steer it**: type a correction and press Enter. The message is
 queued and applied on its next step, so it can change course without you cancelling the run. Steering
@@ -196,14 +240,19 @@ messages show with a `↪` marker. To stop entirely, use **Cancel**.
 | Max tokens | 0 (auto) | Max completion tokens per reply. `0` = half the model's detected context window; omitted when the window is unknown so the provider decides. |
 | Native tool calling | On | Off = model emits fenced JSON actions (for tool-less models). |
 | Show model thinking | On | Show the model's reasoning stream (`reasoning_content` / Anthropic thinking) as a collapsed block above its reply. |
+| Thinking level (Chat) | Auto | Generation effort is sent only to the official OpenAI API for supported `gpt-5.1` model IDs. Strata currently uses Auto because the server does not advertise effort controls. |
+| Compact / Restore chat | Manual | In Settings → Model & context, summarizes older turns and keeps a restorable archive. |
 | Unload the LLM when I run a workflow | On | Unload local model instances when a workflow starts (LM Studio / Ollama). |
+| Embedding connection | Chat provider | Optionally use a separate embedding provider, URL, key, and model. Requires an `/embeddings` endpoint. |
+| Unload embedding model after idle | 60 seconds | LM Studio and Ollama only. Set to `0` to disable idle unloading. |
+| Assistant request timeout | 0 (unlimited) | `assistant_fetch_timeout_ms`; the assistant's browser request has no configured deadline when `0`. |
 | Let the assistant read the ComfyUI console | On | Exposes `get_console_log` so the model can read recent server console output on request. |
 | System prompt | built-in | Instruction preamble. Use **Reset to default** to restore the built-in prompt. |
 | Vision | auto | Detected per model; shown read-only. |
 | Web search provider / key / results | Tavily / empty / 5 | Tavily, Brave, or SerpAPI. |
 | Knowledge base | On | Index installed pack docs + official docs. |
 | Index example workflows / registry / extended docs | On | Add bundled example workflows, the pack registry, and the wiki/README. |
-| Embedding search / embedding model | On / auto | Semantic search via the provider's `/embeddings`; model auto-detected. |
+| Embedding search / embedding model | On / auto | Semantic search via the configured embedding connection's `/embeddings`; model auto-detected when possible. |
 | Official docs auto-update / refresh days | On / 7 | Re-fetch official docs when stale. |
 | Always include last output / input images | Off | Auto-attach images to every message. |
 | Auto-attach images when mentioned | On | Attach the relevant image if you refer to one. |
@@ -216,29 +265,30 @@ messages show with a `↪` marker. To stop entirely, use **Cancel**.
 | Auto-compact when over budget | On | Summarize older turns to fit. |
 | Keep last messages verbatim | 12 | How many recent messages stay untouched. |
 | Use saved lessons / auto-detect corrections / inject limit | On / On / 0 | Memory behavior. `0` = inject every matching lesson. |
-| Record workflow experience (experimental) | On | Store approved workflow fragments and observed execution errors for the runs the assistant edited, and offer them as reference examples. |
-| Ask me to approve successful runs (experimental) | On | After a successful run of an assistant-edited fragment, ask whether the result was what you wanted. |
-| Examples recalled per message (experimental) | 0 | How many experience examples are injected per message. `0` = all matching. |
+| Record workflow experience | On | Store workflow fragments and observed execution results from assistant-edited runs, then offer them as reference examples. |
+| Ask me to approve successful runs | On | After a successful run of an assistant-edited fragment, ask whether the result was what you wanted. |
+| Examples recalled per message | 0 | How many experience examples are injected per message. `0` = all matching. |
+| Debug | Off | Record a privacy-safe diagnostic log. |
 
 ### Limits
 
 There are **no functional caps by default**. Anything that still needs a bound is a setting in
 `chatbot_config.json` → `limits`, where **`0` means unlimited** (and the shipped default is `0`
 for every data/retrieval limit). Retrieval counts come from the request, storage is unbounded,
-and pruning is a manual action. The only non-zero defaults are the local ring buffers
+and pruning is a manual action. The non-zero size defaults are the local ring buffers
 (`debug_max_events`, `console_buffer`) because they live in RAM — set them to `0` if you want
-those unbounded too.
+those unbounded too. The separate embedding-model idle-unload timer defaults to 60 seconds for
+LM Studio and Ollama; it is configurable, and `0` disables it.
 
-**Embedding budget (model-aware).** Embedding models have a finite input window, and sending
-text past it makes retrieval worse. The assistant therefore reads the embedding model's window
-(LM Studio / Ollama) and chunks/indexes to fit — nothing is dropped from the keyword index; only
-the embedded text is bounded. Settings: `embed_max_tokens` (`0` = auto-detect; set a positive
+**Embedding budget (model-aware).** Embedding models have a finite input window. The assistant
+reads the model's window when available (LM Studio / Ollama) and splits full text into as many
+model-sized embedding requests as needed; content is not dropped because of the model window.
+Settings: `embed_max_tokens` (`0` = auto-detect; set a positive
 value to force), `embed_fallback_tokens` (`512`, the common RAG default, used only when the
 provider reports no window), `embed_chars_per_token` (`4`, a token estimate), `kb_chunk_chars`
 (`0` = chunk to the model budget — set a smaller value for finer retrieval) and
 `kb_chunk_overlap` (`150`). The KB status shows the resolved window and its source
 (model / fallback / manual).
-| Debug | Off | Record a privacy-safe diagnostic log. |
 
 ## Files and data
 
@@ -280,14 +330,13 @@ stored or exported. (Use **Clear log** to wipe it.)
   execute fenced JSON action blocks instead.
 - **Images do nothing** — you need a vision-capable (VLM) model. Check **Settings → Vision** says
   `yes`.
-- **First start is slow** — the knowledge base is downloading and indexing the official docs. Watch
-  **Settings → Knowledge Base**; you can disable it or use **Sync official docs** later.
+- **Knowledge indexing is still running** — it starts in the background when the assistant opens.
+  Watch **Settings → Knowledge Base** while using chat; unfinished embedding work resumes on a later
+  build after a restart.
 - **Long chats get cut off or repeat** — reduce **Context window** or lower **Keep last messages
   verbatim** so auto-compaction kicks in sooner.
 - **Port already in use by another local server** (e.g. `11434`) — change the Base URL to the port
   your provider is actually listening on.
-- **Custom node install fails** — ensure `git` is on PATH and ComfyUI's Python can reach PyPI; the
-  install output is shown in the chat.
 
 ## Testing
 
@@ -340,10 +389,7 @@ https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 ## Changelog
 
-### 0.4.6 (experimental — not on main)
-
-> This lives only on the `experimental/experience-memory` branch; `main` (0.4.5) is the stable
-> fallback. Nothing here is published to the registry.
+### Main branch additions (unreleased; 2026-10-22)
 
 - **Workflow experience memory** (separate from preference lessons): records a compact fragment
   (assistant-edited nodes + their 1-hop neighbours, links, model files) against the exact
@@ -468,7 +514,6 @@ https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 ## Maintaining workflow chat ownership
 
-Before changing session handling, workflow switching, history persistence, or request
-lifecycle, read [Workflow chat ownership](docs/workflow-chat-ownership.md). It records
-the September 2026 fix, ownership rules, known history-recovery limits, and required
-regression checks. Preserve the existing LLM busy/typing indicator.
+Each workflow owns its chat. Keep its history, draft, and active request with that workflow
+when switching tabs or restoring a workflow, and preserve the existing LLM busy/typing
+indicator when changing chat handling.
