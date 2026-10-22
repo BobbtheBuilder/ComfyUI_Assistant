@@ -19,7 +19,7 @@ across sessions.
 
 ## Contents
 
-- [Latest changes on main](#latest-changes-on-main)
+- [Latest changes in 0.4.6](#latest-changes-in-046)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -34,9 +34,9 @@ across sessions.
 - [License](#license)
 - [Changelog](#changelog)
 
-## Latest changes on main
+## Latest changes in 0.4.6
 
-Updated 2026-10-22. These changes are on the main branch; no release version is implied.
+Updated 2026-10-22. This release includes the changes below.
 
 - **Workflow chats stay with their workflows.** Restored workflows use their workflow IDs, and
   history, drafts, and requests remain with the owning workflow when you switch tabs. Startup
@@ -391,7 +391,7 @@ https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 
 ## Changelog
 
-### Main branch additions (unreleased; 2026-10-22)
+### 0.4.6 (2026-10-22)
 
 - **Workflow experience memory** (separate from preference lessons): records a compact fragment
   (assistant-edited nodes + their 1-hop neighbours, links, model files) against the exact
