@@ -5,23 +5,17 @@ import threading
 from collections import deque
 from typing import Any
 
+try:
+    from .storage import configured_limit as _limit
+except ImportError:
+    from storage import configured_limit as _limit
+
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _ERROR_RE = re.compile(r"\b(ERROR|WARNING|CRITICAL|Traceback|Exception|Error|Warning)\b")
 
 _lock = threading.RLock()
 _buffer: deque[dict[str, Any]] | None = None
 _registered = False
-
-
-def _limit(name: str, default: int = 0) -> int:
-    try:
-        try:
-            from .config_store import CONFIG_STORE
-        except ImportError:
-            from config_store import CONFIG_STORE
-        return CONFIG_STORE.get_limit(name, default)
-    except Exception:
-        return default
 
 
 def _entries() -> deque[dict[str, Any]]:

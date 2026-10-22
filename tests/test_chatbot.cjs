@@ -8,6 +8,11 @@ const source = fs.readFileSync(path.join(__dirname, "../web/chatbot.js"), "utf8"
 
 function load(names, overrides = {}) {
   const context = vm.createContext({ TextDecoder, AbortController, DOMException, ...overrides });
+  if (!overrides.assistantFetchApi) {
+    context.assistantFetchApi = (...args) => context.api.fetchApi(...args);
+  }
+  const snapshotStart = source.search(/^function historyMessageSnapshot\(/m);
+  vm.runInContext(source.slice(snapshotStart, source.indexOf("\n}", snapshotStart) + 2), context);
   for (const name of names) {
     const start = source.search(new RegExp(`^(?:async )?function ${name}\\(`, "m"));
     assert.notEqual(start, -1, `Missing function ${name}`);
@@ -26,6 +31,293 @@ function responseFor(chunks) {
   };
   return { reader, response: { ok: true, body: { getReader: () => reader } } };
 }
+
+test("assistant requests use the configured timeout override and preserve cancellation", async () => {
+  const controller = new AbortController();
+  let receivedOptions;
+  let finishRequest;
+  let rejectNext = false;
+  const pending = new Promise(resolve => { finishRequest = resolve; });
+  const c = load(["assistantFetchApi", "limitSetting"], {
+    state: { config: { limits: { assistant_fetch_timeout_ms: 0 } } },
+    api: { fetchApi(_url, options) {
+      receivedOptions = options;
+      if (rejectNext) return Promise.reject(new DOMException("Fetch timeout", "TimeoutError"));
+      return pending;
+    } },
+  });
+  const request = c.assistantFetchApi("/chatbot/chat", { method: "POST", signal: controller.signal });
+  assert.equal(receivedOptions.timeoutMs, null, "null disables ComfyUI's built-in deadline");
+  assert.equal(receivedOptions.signal, controller.signal);
+  assert.equal(receivedOptions.method, "POST");
+  controller.abort();
+  assert.equal(receivedOptions.signal.aborted, true);
+  finishRequest("complete after a slow initial response");
+  assert.equal(await request, "complete after a slow initial response");
+
+  c.state.config.limits.assistant_fetch_timeout_ms = 1800000;
+  c.assistantFetchApi("/chatbot/summarize");
+  assert.equal(receivedOptions.timeoutMs, 1800000);
+  rejectNext = true;
+  await assert.rejects(c.assistantFetchApi("/chatbot/context?model=private"), error => {
+    assert.match(error.message, /\/chatbot\/context after 1800000 ms/);
+    assert.doesNotMatch(error.message, /private/);
+    return error.cause?.name === "TimeoutError";
+  });
+});
+
+test("assistant endpoint calls are centralized through assistantFetchApi", () => {
+  const directCalls = source.match(/api\.fetchApi\(/g) || [];
+  assert.equal(directCalls.length, 1, "all ComfyUI fetches use assistantFetchApi");
+  assert.match(source, /function assistantFetchApi\(path, options = \{\}\)/);
+  assert.doesNotMatch(source, /api\.getNodeDefs\(/);
+});
+
+test("large installed-node discovery uses the assistant timeout override", async () => {
+  const calls = [];
+  const defs = { KSampler: {} };
+  const c = load(["getNodeDefs", "assistantFetchApi", "limitSetting"], {
+    state: { config: { limits: { assistant_fetch_timeout_ms: 0 } } },
+    api: { async fetchApi(route, options) {
+      calls.push({ route, options });
+      return { json: async () => defs };
+    } },
+  });
+  assert.equal(await c.getNodeDefs(), defs);
+  assert.equal(await c.getNodeDefs(), defs);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].route, "/object_info");
+  assert.equal(calls[0].options.timeoutMs, null);
+  assert.equal(calls[0].options.cache, "no-store");
+});
+
+test("chat compaction keeps complete tool exchanges and a persisted restorable transcript", async () => {
+  const sourceMessages = [
+    { role: "user", content: "old 0" },
+    { role: "assistant", content: "old 1" },
+    { role: "user", content: "old 2" },
+    { role: "assistant", content: "old 3" },
+    { role: "user", content: "old 4" },
+    { role: "assistant", content: "", tool_calls: [{ id: "call-1" }] },
+    { role: "tool", tool_call_id: "call-1", content: "tool result" },
+    { role: "assistant", content: "tool follow-up" },
+    { role: "user", content: "latest question" },
+    { role: "assistant", content: "latest answer" },
+  ];
+  let saved = false;
+  let summarized;
+  const c = load(["compactContext", "limitSetting", "historyMessageSnapshot"], {
+    state: { sessionKey: "workflow-A", historyRevision: 3, messages: sourceMessages,
+      config: { context: { keep_last: 4 } } },
+    resolveWorkflowKey: () => "workflow-A",
+    requestSummary: async messages => { summarized = messages; return "earlier topics"; },
+    appendNotice() {}, updateContextStatus() {}, updateCompactionButton() {}, saveHistory: async () => { saved = true; },
+  });
+  assert.equal(await c.compactContext({ manual: true }), true);
+  assert.equal(summarized.length, 5);
+  assert.deepEqual(Array.from(c.state.messages.slice(1, 4), message => message.role), ["assistant", "tool", "assistant"]);
+  assert.equal(c.state.messages[0].compaction_archive.length, sourceMessages.length);
+  assert.equal(c.state.messages[0].compaction_tail_count, 5);
+  assert.equal(c.state.messages.at(-2).content, "latest question");
+  assert.equal(saved, true);
+});
+
+test("compaction discards stale summaries and never overwrites a changed transcript", async () => {
+  let finishSummary;
+  const pendingSummary = new Promise(resolve => { finishSummary = resolve; });
+  const original = Array.from({ length: 10 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `message ${index}` }));
+  const c = load(["compactContext", "limitSetting", "historyMessageSnapshot"], {
+    state: { sessionKey: "workflow-A", historyRevision: 4, messages: original, config: { context: { keep_last: 4 } } },
+    requestSummary: () => pendingSummary,
+    appendNotice() {}, updateContextStatus() {}, updateCompactionButton() {}, saveHistory: async () => assert.fail("stale compaction must not save"),
+  });
+  const pending = c.compactContext({ manual: true });
+  c.state.messages.push({ role: "user", content: "new message during summary" });
+  finishSummary("summary of the old transcript");
+  assert.equal(await pending, false);
+  assert.equal(c.state.messages.at(-1).content, "new message during summary");
+
+  let finishOwnerSummary;
+  const ownerPending = new Promise(resolve => { finishOwnerSummary = resolve; });
+  c.state.messages = original;
+  c.state.sessionKey = "workflow-A";
+  c.requestSummary = () => ownerPending;
+  const staleOwner = c.compactContext({ manual: true });
+  c.state.sessionKey = "workflow-B";
+  c.state.historyRevision += 1;
+  c.state.messages = [{ role: "user", content: "workflow B" }];
+  finishOwnerSummary("summary for workflow A");
+  assert.equal(await staleOwner, false);
+  assert.equal(c.state.messages[0].content, "workflow B");
+
+  let liveWorkflow = "workflow-A";
+  let finishLiveSummary;
+  const pendingLiveSummary = new Promise(resolve => { finishLiveSummary = resolve; });
+  c.state.sessionKey = "workflow-A";
+  c.state.historyRevision = 7;
+  c.state.messages = original;
+  c.resolveWorkflowKey = () => liveWorkflow;
+  c.requestSummary = () => pendingLiveSummary;
+  const staleLiveOwner = c.compactContext({ manual: true });
+  liveWorkflow = "workflow-B";
+  finishLiveSummary("summary for inactive workflow A");
+  assert.equal(await staleLiveOwner, false);
+  assert.equal(c.state.messages, original);
+});
+
+test("empty summary leaves the original transcript intact", async () => {
+  const messages = Array.from({ length: 10 }, (_, index) => ({ role: index % 2 ? "assistant" : "user", content: `message ${index}` }));
+  const c = load(["compactContext", "limitSetting", "historyMessageSnapshot"], {
+    state: { sessionKey: "workflow-A", historyRevision: 1, messages, config: { context: { keep_last: 4 } } },
+    requestSummary: async () => "", appendNotice() {}, updateContextStatus() {}, updateCompactionButton() {}, saveHistory: async () => {},
+  });
+  assert.equal(await c.compactContext(), false);
+  assert.equal(c.state.messages, messages);
+});
+
+test("compaction archive is persisted and can restore the full owner chat", async () => {
+  let savedBody;
+  const prior = [
+    { role: "user", content: "original question" }, { role: "assistant", content: "original answer" },
+    { role: "user", content: "retained question" }, { role: "assistant", content: "retained answer" },
+  ];
+  const current = [
+    { role: "system", content: "Summary of earlier conversation", compaction_archive: prior, compaction_tail_count: 2 },
+    ...prior.slice(-2), { role: "user", content: "new question" }, { role: "assistant", content: "new answer" },
+  ];
+  const c = load(["saveHistory", "restorePreviousChat", "compactArchiveMessage", "historyMessageSnapshot"], {
+    state: { sessionKey: "workflow-A", historyRevision: 2, messages: current },
+    api: { fetchApi: async (_url, options) => { savedBody = JSON.parse(options.body); return { ok: true }; } },
+    resolveWorkflowKey: () => "workflow-A", renderHistory() {}, updateContextStatus() {}, updateCompactionButton() {},
+    appendNotice() {},
+  });
+  await c.saveHistory();
+  assert.deepEqual(savedBody.messages[0].compaction_archive, prior);
+  assert.equal(savedBody.messages[0].compaction_tail_count, 2);
+  assert.equal(await c.restorePreviousChat(), true);
+  assert.equal(JSON.stringify(c.state.messages), JSON.stringify([...prior, ...current.slice(3)]));
+  assert.equal(savedBody.key, "workflow-A");
+});
+
+test("Strata uses its default URL while preserving custom server addresses", () => {
+  const provider = { value: "strata" };
+  const field = { value: "http://127.0.0.1:1234/v1" };
+  const c = load(["applyProviderDefaultUrl"], {
+    state: { dom: { root: { querySelector: selector => selector === "#ccb-provider" ? provider : field } } },
+  });
+  c.applyProviderDefaultUrl();
+  assert.equal(field.value, "http://p40:8080/v1");
+  provider.value = "ollama";
+  c.applyProviderDefaultUrl();
+  assert.equal(field.value, "http://127.0.0.1:11434/v1");
+  provider.value = "strata";
+  field.value = "http://custom-host:8080/v1";
+  c.applyProviderDefaultUrl();
+  assert.equal(field.value, "http://custom-host:8080/v1");
+});
+
+test("assistant setup returns without waiting for startup reads", () => {
+  let extension;
+  let startupReadsStarted = false;
+  const c = load(["setupAssistant"], {
+    app: { registerExtension(value) { extension = value; } },
+    api: { addEventListener() {} },
+    window: { addEventListener() {} },
+    state: { pendingRuns: new Map(), lastOutputs: [] },
+    buildUi() {}, installRunCapture() {}, resolveWorkflowKey: () => "id:workflow",
+    startSessionWatcher() {}, setupCanvasCoexistence() {},
+    initializeAssistantData() { startupReadsStarted = true; return new Promise(() => {}); },
+  });
+  assert.equal(typeof c.setupAssistant, "function");
+  assert.equal(c.setupAssistant(), undefined);
+  assert.equal(startupReadsStarted, true);
+  assert.equal(c.state.historyLoading, true);
+});
+
+test("background startup keeps history loading until configuration finishes", async () => {
+  let finishConfig;
+  const configPending = new Promise(resolve => { finishConfig = resolve; });
+  const calls = [];
+  const c = load(["initializeAssistantData"], {
+    loadConfig: () => configPending,
+    loadHistory: async () => calls.push("history"),
+    loadLessons: async () => calls.push("lessons"),
+    loadExperiences: async () => calls.push("experiences"),
+    debugLog() {}, setStatus() {},
+  });
+  const initialization = c.initializeAssistantData();
+  assert.deepEqual(calls, []);
+  finishConfig();
+  await initialization;
+  assert.deepEqual(calls.sort(), ["experiences", "history", "lessons"]);
+});
+
+test("settings hydration is local and three embedding selectors share discovery", async () => {
+  const selections = new Map(["#ccb-embedding-model", "#ccb-memory-embed-model", "#ccb-kb-embed-model"]
+    .map(selector => [selector, { value: "", options: [], appendChild(option) { this.options.push(option); }, set innerHTML(_value) { this.options = []; } }]));
+  selections.set("#ccb-thinking-level", { value: "", options: [], appendChild(option) { this.options.push(option); }, set innerHTML(_value) { this.options = []; } });
+  let requests = 0;
+  const c = load(["populateSettings", "setLocalModelOption", "refreshEmbedModels", "populateThinkingLevelMenu", "supportedThinkingLevels"], {
+    state: { config: {
+      embedding: { model: "embed-main" },
+      memory: { embed: { model: "embed-memory" } },
+      kb: { embed: { model: "embed-kb" } },
+    }, availableModels: [], dom: { root: { querySelector(selector) { return selections.get(selector) || { value: "" }; } } } },
+    setValue() {}, setPlaceholder() {}, setChecked() {}, setModelOptions() {},
+    updateDebugStatus() {}, updateVisionBadge() {}, updateContextStatus() {},
+    el: (_tag, props) => props,
+    collectSettings: () => ({ provider: "chat", base_url: "http://provider", embedding: { provider: "embed", base_url: "http://embed", api_key: "secret" } }),
+    api: { async fetchApi() { requests += 1; await new Promise(resolve => setTimeout(resolve, 0)); return { json: async () => ({ models: ["one", "two"] }) }; } },
+    document: { createElement: () => ({}) },
+  });
+  c.populateSettings();
+  assert.equal(requests, 0, "local hydration must not call providers");
+  await Promise.all([
+    c.refreshEmbedModels("embed-main", "#ccb-embedding-model"),
+    c.refreshEmbedModels("embed-memory", "#ccb-memory-embed-model"),
+    c.refreshEmbedModels("embed-kb", "#ccb-kb-embed-model"),
+  ]);
+  assert.equal(requests, 1);
+  assert.equal(selections.get("#ccb-embedding-model").value, "embed-main");
+  assert.equal(selections.get("#ccb-memory-embed-model").value, "embed-memory");
+  assert.equal(selections.get("#ccb-kb-embed-model").value, "embed-kb");
+});
+
+test("late model discovery cannot replace results for the newly selected embedding server", async () => {
+  const select = { value: "saved", options: [], appendChild(option) { this.options.push(option); }, set innerHTML(_value) { this.options = []; } };
+  let baseUrl = "http://server-a";
+  const pending = [];
+  const c = load(["refreshEmbedModels"], {
+    state: { dom: { root: { querySelector: () => select } } },
+    collectSettings: () => ({ embedding: { provider: "embed", base_url: baseUrl } }),
+    api: { fetchApi: () => new Promise(resolve => pending.push(models => resolve({ json: async () => ({ models }) }))) },
+    document: { createElement: () => ({}) },
+  });
+  const oldRequest = c.refreshEmbedModels("", "#ccb-kb-embed-model");
+  baseUrl = "http://server-b";
+  const newRequest = c.refreshEmbedModels("", "#ccb-kb-embed-model");
+  pending[1](["model-b"]);
+  await newRequest;
+  pending[0](["model-a"]);
+  await oldRequest;
+  assert.ok(select.options.some(option => option.value === "model-b"));
+  assert.ok(!select.options.some(option => option.value === "model-a"));
+  assert.equal(select.value, "saved");
+});
+
+test("lesson and experience list loads do not automatically reindex vectors", async () => {
+  const paths = [];
+  const c = load(["loadLessons", "loadExperiences"], {
+    state: { lessons: [], experience: [], config: { memory: { embed: { enabled: true } }, experience: { enabled: true } }, dom: { root: { querySelector: () => null } } },
+    api: { async fetchApi(path) { paths.push(path); return { json: async () => ({ lessons: [], experiences: [], embedding: {} }) }; } },
+    updateMemoryStatus() {}, updateExperienceStatus() {}, renderMemoryList() {}, renderExperienceList() {},
+  });
+  await c.loadLessons();
+  await c.loadExperiences();
+  assert.deepEqual(paths, ["/chatbot/memory", "/chatbot/experience"]);
+});
+
+
 
 test("workflow identity stays stable through lazy IDs and saving, and new tabs stay separate", () => {
   const app = { workflowManager: { activeWorkflow: { isTemporary: true } } };
@@ -71,7 +363,7 @@ test("loading workflows wait for identity and can use their own serialized conte
   workflow.content = JSON.stringify({ id: "correct-owner" });
   assert.equal(c.resolveWorkflowKey(), "id:correct-owner");
   workflow.activeState = { id: "changed-later" };
-  assert.equal(c.resolveWorkflowKey(), "id:correct-owner", "identity freezes for this object");
+  assert.equal(c.resolveWorkflowKey(), "id:changed-later", "resetting the same object must change its modern owner");
 });
 
 test("unassigned startup never reads or writes the shared default chat", async () => {
@@ -300,11 +592,45 @@ test("streamChat forwards reasoning without polluting text", async () => {
   );
   const { response } = responseFor([bytes]);
   const events = [];
-  const c = load(["streamChat"], { api: { fetchApi: async () => response } });
+  const c = load(["streamChat", "assistantFetchApi", "limitSetting"], {
+    state: { config: { limits: { assistant_fetch_timeout_ms: 0 } } },
+    api: { fetchApi: async () => response },
+  });
   const result = await c.streamChat([], [], event => events.push(event));
   assert.equal(result.text, "Hi");
   assert.equal(result.reasoning, "hmm ok");
   assert.deepEqual(events.map(event => event.type), ["reasoning", "text", "reasoning"]);
+});
+
+test("streamChat sends the request's captured thinking level", async () => {
+  const { response } = responseFor([Buffer.from('{"type":"text","text":"ok"}\n')]);
+  let requestBody;
+  const c = load(["streamChat", "assistantFetchApi", "limitSetting"], {
+    state: { config: { limits: { assistant_fetch_timeout_ms: 0 }, thinking: { level: "high" } } },
+    api: { fetchApi: async (_url, options) => { requestBody = JSON.parse(options.body); return response; } },
+  });
+  const requestSnapshot = { level: "low" };
+  c.state.config.thinking.level = "high";
+  await c.streamChat([], [], null, null, requestSnapshot);
+  assert.deepEqual(requestBody.thinking, { level: "low" });
+});
+
+test("thinking menu persistence posts only the thinking level", async () => {
+  let requestBody;
+  const c = load(["saveThinkingLevel"], {
+    state: { config: { provider: "strata", temperature: 0.7, thinking: { enabled: false, level: "auto" } },
+      dom: { thinkingLevel: { value: "low" } } },
+    assistantFetchApi: async (_url, options) => {
+      requestBody = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ config: { thinking: { enabled: false, level: "low" } } }) };
+    },
+    setStatus() {},
+  });
+  await c.saveThinkingLevel();
+  assert.deepEqual(requestBody, { thinking: { level: "low" } });
+  assert.equal(c.state.config.temperature, 0.7);
+  assert.equal(c.state.config.thinking.enabled, false);
+  assert.equal(c.state.config.thinking.level, "low");
 });
 
 test("shared stream parser handles split UTF-8 and final line without newline", async () => {
@@ -313,10 +639,13 @@ test("shared stream parser handles split UTF-8 and final line without newline", 
   const { reader, response } = responseFor([bytes.subarray(0, split), bytes.subarray(split)]);
   const controller = new AbortController();
   const events = [];
-  const c = load(["streamChat"], { api: { fetchApi: async (_url, options) => {
+  const c = load(["streamChat", "assistantFetchApi", "limitSetting"], {
+    state: { config: { limits: { assistant_fetch_timeout_ms: 0 } } },
+    api: { fetchApi: async (_url, options) => {
     assert.equal(options.signal, controller.signal);
     return response;
-  } } });
+    } },
+  });
   const result = await c.streamChat([], [], event => events.push(event), controller.signal);
   assert.equal(result.text, "café");
   assert.equal(result.toolCalls[0].name, "test");
@@ -326,7 +655,10 @@ test("shared stream parser handles split UTF-8 and final line without newline", 
 
 test("stream errors reject and release the reader", async () => {
   const { reader, response } = responseFor([Buffer.from('{"type":"error","error":"failed"}\n')]);
-  const c = load(["streamChat"], { api: { fetchApi: async () => response } });
+  const c = load(["streamChat", "assistantFetchApi", "limitSetting"], {
+    state: { config: { limits: { assistant_fetch_timeout_ms: 0 } } },
+    api: { fetchApi: async () => response },
+  });
   await assert.rejects(c.streamChat([], []), /failed/);
   assert.ok(reader.cancelled && reader.released);
 });
@@ -373,7 +705,7 @@ test("cancelled task never executes returned tool calls", async () => {
 });
 
 test("cancelled suite restores workflow without asking for another verdict", async () => {
-  const state = {};
+  const state = { sessionKey: "test" };
   let restored = false;
   let judged = false;
   const c = load(["startWorkflowTestSuite"], {
@@ -609,4 +941,199 @@ test("rejected connections do not report a successful edit", () => {
     withGraphChange: fn => fn() });
   assert.match(c.connectNodes(1, 0, 2, 0).error, /Connection rejected/);
   assert.equal(state.runMutatedGraph, undefined);
+});
+
+
+test("run capture freezes workflow and fragment before queue response", async () => {
+  let finish;
+  let owner = "a";
+  const state = { sessionKey: "a", runNodeOwner: "a", pendingRuns: new Map(), runTaskText: "task A" };
+  const fragment = { nodes: [{ id: 1, type: "A" }] };
+  const api = { queuePrompt: () => new Promise(resolve => { finish = resolve; }) };
+  const c = load(["captureRunContext", "trackRunSubmit", "installRunCapture"], {
+    state, api, resolveWorkflowKey: () => owner, experienceFragment: () => fragment,
+    experienceModels: () => [], lastUserTask: () => "fallback",
+  });
+  c.installRunCapture();
+  const pending = api.queuePrompt();
+  owner = "b";
+  state.sessionKey = "b";
+  fragment.nodes[0].type = "B";
+  finish({ prompt_id: "p" });
+  await pending;
+  const entry = state.pendingRuns.get("p");
+  assert.equal(entry.workflow_key, "a");
+  assert.equal(entry.fragment.nodes[0].type, "A");
+  assert.equal(c.captureRunContext(), null, "old node IDs cannot belong to the new workflow");
+});
+
+test("background run approval never appears in another workflow chat", async () => {
+  const c = load(["askRunApproval"], {
+    state: { sessionKey: "b" }, resolveWorkflowKey: () => "b",
+    appendChatCard: () => assert.fail("Wrong workflow must not receive approval card"),
+  });
+  await c.askRunApproval(1, { workflow_key: "a" });
+});
+
+test("coverage summary is compact and expanding it exposes every missing node", async () => {
+  const status = { textContent: "" };
+  const content = { textContent: "" };
+  const details = { open: false, querySelector: () => content };
+  const missing = Array.from({ length: 631 }, (_, i) => `Node${i}`);
+  const c = load(["refreshKbStatus"], {
+    state: { dom: { root: { querySelector: selector => selector === "#ccb-kb-status" ? status :
+      selector === "#ccb-kb-coverage" ? details : null }, panel: { classList: { contains: () => false } } } },
+    api: { fetchApi: async () => ({ json: async () => ({ status: {
+      coverage: { registry_available: true, registered: 4589, indexed: 3958, missing },
+    } }) }) },
+    clearTimeout: () => {}, setTimeout: () => {},
+  });
+  await c.refreshKbStatus();
+  assert.match(status.textContent, /missing: 631/);
+  assert.equal(status.textContent.includes("Node630"), false);
+  details.open = true;
+  details.ontoggle();
+  for (const name of missing) assert.ok(content.textContent.includes(name));
+});
+
+test("provider choices and URL defaults contain Strata only once", () => {
+  const markup = source.slice(source.indexOf('function buildUi()'), source.indexOf('function wireUi()'));
+  const provider = markup.match(/<select id="ccb-provider">([\s\S]*?)<\/select>/)[1];
+  const values = [...provider.matchAll(/value="([^"]+)"/g)].map(match => match[1]);
+  assert.equal(values.length, new Set(values).size);
+  assert.equal(values.filter(value => value === "strata").length, 1);
+});
+
+test("modern empty store never borrows legacy workflow and modern drafts wait for an ID", () => {
+  const app = { extensionManager: { workflow: { activeWorkflow: null } },
+    workflowManager: { activeWorkflow: { activeState: { id: "stale" } } } };
+  const c = load(["resolveWorkflowKey"], { app, _workflowSessionKeys: new WeakMap(), _workflowSessionSeq: 0, _workflowSessionNonce: "test" });
+  assert.equal(c.resolveWorkflowKey(), null);
+  app.extensionManager.workflow.activeWorkflow = { isLoaded: true, isTemporary: true };
+  assert.equal(c.resolveWorkflowKey(), null);
+  app.extensionManager.workflow.activeWorkflow.activeState = { id: "ready" };
+  assert.equal(c.resolveWorkflowKey(), "id:ready");
+});
+
+test("a reused workflow object cannot authorize a request for its previous ID", () => {
+  const workflow = { activeState: { id: "a" } };
+  const state = { runWorkflowKey: "id:a" };
+  const c = load(["resolveWorkflowKey", "assertRunWorkflow"], {
+    state, app: { extensionManager: { workflow: { activeWorkflow: workflow } } },
+    _workflowSessionKeys: new WeakMap(), _workflowSessionSeq: 0, _workflowSessionNonce: "test",
+  });
+  c.assertRunWorkflow();
+  workflow.activeState = { id: "b" };
+  assert.throws(() => c.assertRunWorkflow(), /original workflow/);
+});
+
+test("failed or malformed history reads cannot erase saved history and can retry", async () => {
+  for (const response of [{ ok: false, status: 500 }, { json: async () => ({ error: "failed" }) }]) {
+    const state = { sessionKey: "a", messages: [] };
+    const fetchApi = async (_url, options) => {
+      assert.notEqual(options?.method, "POST", "failed read must never be persisted");
+      return response;
+    };
+    const api = { fetchApi };
+    const c = load(["loadHistory", "saveHistory"], { state, api,
+      appendNotice() {}, renderHistory() {}, updateContextStatus() {} });
+    await c.loadHistory();
+    assert.equal(state.historyLoadFailed, true);
+    await c.saveHistory();
+    api.fetchApi = async () => ({ json: async () => ({ history: [{ content: "saved A" }] }) });
+    await c.loadHistory();
+    assert.equal(state.historyLoadFailed, false);
+    assert.equal(state.messages[0].content, "saved A");
+  }
+});
+
+test("a startup history read cannot replace a transcript after a request starts", async () => {
+  let finish;
+  const state = { sessionKey: "a", messages: [] };
+  const c = load(["loadHistory"], {
+    state, api: { fetchApi: () => new Promise(resolve => { finish = resolve; }) },
+    renderHistory: () => assert.fail("stale startup data must not render"), updateContextStatus() {}, appendNotice() {},
+  });
+  const loading = c.loadHistory();
+  await Promise.resolve();
+  state.requestActive = true;
+  state.messages = [{ role: "user", content: "active request" }];
+  finish({ json: async () => ({ history: [{ role: "assistant", content: "stale startup history" }] }) });
+  await loading;
+  assert.equal(state.messages[0].content, "active request");
+  assert.equal(state.historyLoading, false);
+});
+
+test("failed writes remain available when switching A-B-A", async () => {
+  const state = { sessionKey: "a", messages: [{ role: "user", content: "unsaved A" }], attachments: [],
+    dom: { input: { value: "", style: {} } } };
+  const c = load(["loadHistory", "saveHistory", "switchSession"], {
+    state,
+    api: { fetchApi: async (url, options) => options?.method === "POST"
+      ? { ok: false, status: 500 }
+      : { ok: true, json: async () => ({ history: [] }) } },
+    debugLog() {}, hashKey: x => x, renderHistory() {}, renderAttachments() {}, updateContextStatus() {},
+    appendNotice() {}, scrollMessages() {},
+  });
+  await c.saveHistory();
+  assert.ok(state.unsavedHistories.has("a"));
+  await c.switchSession("b");
+  state.messages = [{ role: "user", content: "B" }];
+  await c.switchSession("a");
+  assert.equal(state.messages[0].content, "unsaved A");
+  assert.equal(state.historyLoadFailed, false);
+});
+
+test("closing all tabs clears the chat and rejects a late history response", async () => {
+  let finish;
+  const state = { sessionKey: "a", messages: [], attachments: [], dom: { input: { value: "", style: {} } } };
+  const c = load(["loadHistory", "saveHistory", "switchSession"], {
+    state, api: { fetchApi: () => new Promise(resolve => { finish = resolve; }) },
+    debugLog() {}, hashKey: x => x, renderHistory() {}, renderAttachments() {}, updateContextStatus() {},
+    appendNotice() {}, scrollMessages() {},
+  });
+  const reading = c.loadHistory();
+  await Promise.resolve();
+  await c.switchSession(null);
+  finish({ json: async () => ({ history: [{ content: "old A" }] }) });
+  await reading;
+  assert.equal(state.sessionKey, null);
+  assert.equal(state.messages.length, 0);
+  assert.equal(state.historyLoading, false);
+});
+
+test("delayed attachments stay with the source draft across a tab switch", async () => {
+  let finish;
+  let renders = 0;
+  const original = [];
+  const state = { sessionKey: "a", attachments: original };
+  const c = load(["addAttachment"], { state, urlToDataUrl: () => new Promise(resolve => { finish = resolve; }),
+    renderAttachments: () => renders++, appendNotice() {} });
+  const attaching = c.addAttachment({ url: "image", name: "A image" });
+  state.sessionKey = "b";
+  state.attachments = [];
+  finish("encoded-image");
+  await attaching;
+  assert.equal(original[0].dataUrl, "encoded-image");
+  assert.equal(state.attachments.length, 0);
+  assert.equal(renders, 0);
+});
+
+test("snapshot restoration targets the existing workflow instead of creating a tab", async () => {
+  const workflow = { activeState: { id: "a" } };
+  let args;
+  const c = load(["loadGraphSnapshot"], { state: { runWorkflowKey: "a" }, assertRunWorkflow() {},
+    app: { extensionManager: { workflow: { activeWorkflow: workflow } }, loadGraphData: async (...values) => { args = values; } } });
+  const snapshot = { nodes: [] };
+  await c.loadGraphSnapshot(snapshot);
+  assert.equal(args[0], snapshot);
+  assert.equal(args[3], workflow);
+});
+
+test("test suite switches chat owner before it can clear a different workflow", async () => {
+  const switched = [];
+  const c = load(["startWorkflowTestSuite"], { state: { sessionKey: "a" }, resolveWorkflowKey: () => "b",
+    switchSession: async key => switched.push(key), clearGraph: () => assert.fail("must not clear yet") });
+  await c.startWorkflowTestSuite();
+  assert.deepEqual(switched, ["b"]);
 });

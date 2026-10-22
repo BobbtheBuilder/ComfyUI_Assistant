@@ -46,6 +46,15 @@ class MemoryStoreTest(unittest.TestCase):
     def tearDown(self):
         memory.DB_PATH = self._original
 
+    def test_lesson_text_change_invalidates_vector_and_deleted_records_reject_vectors(self):
+        item = memory.add_lesson("Use node A", vector=[1.0, 0.0])
+        self.assertEqual(memory.vector_stats()["embedded"], 1)
+        memory.update_lesson(item["id"], text="Use node B")
+        self.assertEqual(memory.vector_stats()["embedded"], 0)
+        self.assertIn((item["id"], "Use node B"), memory.pending_lessons())
+        memory.delete_lesson(item["id"])
+        self.assertFalse(memory.set_vector(item["id"], [1.0, 0.0]))
+
     def test_add_list_search_update_delete(self):
         result = memory.add_lesson("Always use fp8 for SDXL", tags="sdxl", pinned=True)
         self.assertFalse(result["updated"])

@@ -328,13 +328,26 @@
   border-top: 1px solid var(--ccb-border);
   padding: 8px;
   display: flex;
+  flex-direction: column;
   gap: 8px;
-  align-items: flex-end;
+  align-items: stretch;
   background: var(--ccb-bg-alt);
 }
 
+#ccb-root .ccb-composer-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+#ccb-root .ccb-composer-controls .ccb-new-btn {
+  margin-left: auto;
+}
+
 #ccb-root .ccb-input {
-  flex: 1;
+  width: 100%;
+  box-sizing: border-box;
+  flex: none;
   resize: none;
   min-height: 38px;
   max-height: 140px;
@@ -345,6 +358,18 @@
   padding: 8px;
   font-size: 13px;
   font-family: inherit;
+}
+
+#ccb-root .ccb-thinking-level {
+  height: 38px;
+  flex: none;
+  max-width: 108px;
+  padding: 0 4px;
+  border: 1px solid var(--ccb-border);
+  border-radius: 8px;
+  background: var(--ccb-bg);
+  color: var(--ccb-text);
+  font-size: 11px;
 }
 
 #ccb-root .ccb-input:focus {
@@ -417,11 +442,79 @@
 }
 
 #ccb-root .ccb-settings {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+#ccb-root .ccb-settings-section {
+  flex-shrink: 0;
+  border: 1px solid var(--ccb-border);
+  border-radius: 8px;
+  background: var(--ccb-bg-alt);
+}
+
+#ccb-root .ccb-settings-section > summary {
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#ccb-root .ccb-settings-section > summary span {
+  display: block;
+  margin-top: 4px;
+  color: var(--ccb-muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+#ccb-root .ccb-settings-section > summary:focus-visible {
+  outline: 2px solid var(--ccb-accent);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+
+#ccb-root .ccb-section-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 12px 12px;
+}
+
+#ccb-root .ccb-settings-view .ccb-row {
+  flex-wrap: wrap;
+}
+
+#ccb-root .ccb-settings-view .ccb-field {
+  min-width: 0;
+}
+
+#ccb-root .ccb-settings-view input,
+#ccb-root .ccb-settings-view select,
+#ccb-root .ccb-settings-view textarea {
+  min-width: 0;
+  max-width: 100%;
+}
+
+#ccb-root .ccb-settings-footer {
+  flex-shrink: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--ccb-border);
+  background: var(--ccb-bg-alt);
+}
+
+#ccb-root .ccb-settings-footer .ccb-status:empty {
+  display: none;
+}
+
+#ccb-root .ccb-settings-footer .ccb-status:not(:empty) {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
 }
 
 #ccb-root .ccb-field {

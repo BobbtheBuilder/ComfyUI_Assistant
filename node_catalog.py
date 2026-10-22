@@ -44,8 +44,8 @@ def snapshot(attempts: int = 6, delay: float = 0.2) -> tuple[dict[str, Any], dic
     raise last_error if last_error else RuntimeError("Node registry is unavailable.")
 
 
-def record(node_type: str) -> dict[str, Any]:
-    mapping, names = registry()
+def record(node_type: str, inventory=None) -> dict[str, Any]:
+    mapping, names = inventory if inventory is not None else registry()
     cls = mapping.get(node_type)
     if cls is None:
         return {"name": node_type, "available": False, "schema_error": "Not registered in this ComfyUI session."}

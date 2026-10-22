@@ -15,9 +15,9 @@ import time
 from typing import Any, Mapping
 
 try:
-    from .storage import connect, fts_query
+    from .storage import connect, fts_query, fuse_ranked as _fuse, wanted as _wanted
 except ImportError:
-    from storage import connect, fts_query
+    from storage import connect, fts_query, fuse_ranked as _fuse, wanted as _wanted
 
 try:
     from . import node_catalog
@@ -429,27 +429,6 @@ def _fts_rank(conn: sqlite3.Connection, query: str, limit: int) -> list[tuple[in
     return [(int(row[0]), _row_to_dict(row)) for row in rows]
 
 
-def _fuse(ranked: list[list[tuple[int, dict[str, Any]]]], limit: int) -> list[dict[str, Any]]:
-    scores: dict[int, float] = {}
-    items: dict[int, dict[str, Any]] = {}
-    for group in ranked:
-        for rank, (experience_id, item) in enumerate(group):
-            scores[experience_id] = scores.get(experience_id, 0.0) + 1.0 / (60 + rank)
-            items.setdefault(experience_id, item)
-    ordered = sorted(scores, key=lambda experience_id: -scores[experience_id])
-    if limit and limit > 0:
-        ordered = ordered[:limit]
-    return [items[experience_id] for experience_id in ordered]
-
-
-def _wanted(limit: Any) -> int:
-    try:
-        value = int(limit)
-    except (TypeError, ValueError):
-        return 0
-    return value if value > 0 else 0
-
-
 def search(query: str, limit: int = 0, query_vec: Any = None) -> list[dict[str, Any]]:
     limit = _wanted(limit)
     with _lock:
@@ -500,6 +479,8 @@ def set_vector(experience_id: int, vector: Any) -> bool:
         conn = _connect()
         try:
             _init(conn)
+            if not conn.execute("SELECT 1 FROM experiences WHERE id = ?", (int(experience_id),)).fetchone():
+                return False
             conn.execute(
                 "INSERT OR REPLACE INTO experience_vectors (experience_id, dim, vec) VALUES (?, ?, ?)",
                 (int(experience_id), int(array.shape[0]), array.tobytes()),
@@ -559,20 +540,29 @@ def stored_embed_model() -> str:
             conn.close()
 
 
-def ensure_embed_model(model: str) -> None:
+def ensure_embed_model(model: str, identity: str | None = None) -> None:
     model = str(model or "")
+    identity = str(identity or model)
     with _lock:
         conn = _connect()
         try:
             _init(conn)
-            row = conn.execute("SELECT value FROM meta WHERE key = 'experience_embed_model'").fetchone()
-            if (row[0] if row else "") != model:
+            row = conn.execute("SELECT value FROM meta WHERE key = 'experience_embed_identity'").fetchone()
+            if (row[0] if row else "") != identity:
                 conn.execute("DELETE FROM experience_vectors")
                 conn.execute(
                     "INSERT OR REPLACE INTO meta (key, value) VALUES ('experience_embed_model', ?)", (model,)
                 )
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('experience_embed_identity', ?)", (identity,)
+                )
                 conn.commit()
                 _vectors_cache.update({"key": None, "count": -1, "ids": None, "matrix": None})
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('experience_embed_model', ?)", (model,)
+                )
+                conn.commit()
         finally:
             conn.close()
 

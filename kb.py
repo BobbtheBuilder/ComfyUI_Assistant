@@ -15,8 +15,10 @@ from typing import Any, Mapping
 
 try:
     from . import node_catalog
+    from .embedding_text import embedding_parts
 except ImportError:
     import node_catalog
+    from embedding_text import embedding_parts
 
 try:
     from .debug import debug_log as _debug_log
@@ -24,9 +26,9 @@ except ImportError:
     from debug import debug_log as _debug_log
 
 try:
-    from .storage import connect, fts_query
+    from .storage import connect, fts_query, wanted as _wanted, configured_limit as _limit
 except ImportError:
-    from storage import connect, fts_query
+    from storage import connect, fts_query, wanted as _wanted, configured_limit as _limit
 
 NODE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(NODE_DIR, "kb_index.sqlite")
@@ -73,6 +75,12 @@ _state: dict[str, Any] = {
     "embed_model": "",
     "embed_window_tokens": 0,
     "embed_window_source": "",
+    "embed_window_observed_tokens": 0,
+    "embed_window_observed_source": "",
+    "embed_reason": "",
+    "embed_endpoint_confirmation_required": False,
+    "embed_current_identity": "",
+    "embed_previous_identity": "",
     "embed_error": "",
     "official_fetched_at": 0.0,
     "official_fetched_iso": "",
@@ -102,16 +110,25 @@ def _custom_node_dirs() -> list[str]:
     return [os.path.realpath(path) for path in paths if os.path.isdir(path)]
 
 
-def _limit(name: str, default: int = 0) -> int:
-    """0 means no cap. Reads the shared limits settings."""
+def _is_generated_graft_dir(path: str) -> bool:
+    """Recognize generated graft output by its marker, not its name alone."""
+    if os.path.basename(path).lower() != "graft":
+        return False
     try:
-        try:
-            from .config_store import CONFIG_STORE
-        except ImportError:
-            from config_store import CONFIG_STORE
-        return CONFIG_STORE.get_limit(name, default)
-    except Exception:
-        return default
+        with open(os.path.join(path, "INDEX.md"), "r", encoding="utf-8", errors="replace") as handle:
+            return handle.readline().strip().lower().startswith("# graft ")
+    except OSError:
+        return False
+
+
+def _generated_graft_path(path: str) -> bool:
+    parts = os.path.realpath(path).split(os.sep)
+    for index, part in enumerate(parts):
+        if part.lower() == "graft":
+            candidate = os.sep.join(parts[:index + 1]) or os.sep
+            if _is_generated_graft_dir(candidate):
+                return True
+    return False
 
 
 def _connect() -> sqlite3.Connection:
@@ -132,12 +149,33 @@ def _init(conn: sqlite3.Connection) -> None:
             heading TEXT,
             content TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS chunks_source ON chunks(source_kind, source);
+        CREATE INDEX IF NOT EXISTS chunks_path ON chunks(path);
         CREATE TABLE IF NOT EXISTS files (path TEXT PRIMARY KEY, mtime REAL, size INTEGER);
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS node_records (name TEXT PRIMARY KEY, record TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS node_examples (node_type TEXT, path TEXT, record TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS node_examples_type ON node_examples(node_type);
         CREATE TABLE IF NOT EXISTS embeddings (chunk_id INTEGER PRIMARY KEY, dim INTEGER, vec BLOB);
+        CREATE TABLE IF NOT EXISTS embedding_fragments (
+            chunk_id INTEGER, part INTEGER, dim INTEGER, vec BLOB,
+            PRIMARY KEY (chunk_id, part)
+        );
+        CREATE TRIGGER IF NOT EXISTS embeddings_fragments_ad AFTER DELETE ON embeddings BEGIN
+            DELETE FROM embedding_fragments WHERE chunk_id = old.chunk_id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS fragments_ai AFTER INSERT ON embedding_fragments BEGIN
+            INSERT INTO meta(key, value) VALUES ('embeddings_revision', '1')
+            ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS fragments_au AFTER UPDATE ON embedding_fragments BEGIN
+            INSERT INTO meta(key, value) VALUES ('embeddings_revision', '1')
+            ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS fragments_ad AFTER DELETE ON embedding_fragments BEGIN
+            INSERT INTO meta(key, value) VALUES ('embeddings_revision', '1')
+            ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
+        END;
         CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
             content, title, heading, pack, source,
             content='chunks', content_rowid='id', tokenize='porter unicode61'
@@ -165,11 +203,6 @@ def _init(conn: sqlite3.Connection) -> None:
             INSERT INTO meta(key, value) VALUES ('embeddings_revision', '1')
             ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1;
         END;
-        -- Old vectors may already refer to reused chunk IDs. Rebuild them once.
-        DELETE FROM embeddings WHERE NOT EXISTS (
-            SELECT 1 FROM meta WHERE key = 'embeddings_cleanup_v1'
-        );
-        INSERT OR IGNORE INTO meta(key, value) VALUES ('embeddings_cleanup_v1', '1');
         """
     )
 
@@ -231,19 +264,26 @@ def _chunks_for_text(text: str, max_chars: int = CHUNK_CHARS, overlap: int = CHU
     return result
 
 
-def _effective_chunk_chars() -> tuple[int, int]:
+def _effective_chunk_chars(refresh: bool = False) -> tuple[int, int]:
     """Chunk size/overlap for indexing: an explicit setting, else the embedding budget."""
     overlap = _limit("kb_chunk_overlap", 150) or 0
     configured = _limit("kb_chunk_chars", 0)
     if configured > 0:
         return configured, overlap
+    if not refresh:
+        try:
+            previous = json.loads(_meta_get("node_chunking") or "null")
+            if previous and previous[0] > 0:
+                return int(previous[0]), overlap
+        except (ValueError, TypeError, sqlite3.Error):
+            pass
     try:
         config, model = _embed_settings()
         if config is not None:
             resolved = _resolve_embed_model(config, model)
             if resolved:
-                _tokens, chars, _source = asyncio.run(_providers_module().embedding_limits(config, resolved))
-                if chars > 0:
+                _tokens, chars, source = asyncio.run(_providers_module().embedding_limits(config, resolved))
+                if chars > 0 and source != "fallback":
                     return chars, overlap
     except Exception:
         pass
@@ -283,7 +323,8 @@ def index_local() -> int:
         current: dict[str, tuple[float, int, str, str]] = {}
         for root in roots:
             for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = [name for name in dirnames if name not in EXCLUDED_DIRS]
+                dirnames[:] = [name for name in dirnames if name not in EXCLUDED_DIRS
+                               and not _is_generated_graft_dir(os.path.join(dirpath, name))]
                 for name in filenames:
                     if not name.lower().endswith(DOC_EXTENSIONS):
                         continue
@@ -300,16 +341,21 @@ def index_local() -> int:
                     current[full] = (stat.st_mtime, stat.st_size, pack, rel)
 
         known = {row[0]: (row[1], row[2]) for row in conn.execute("SELECT path, mtime, size FROM files")}
+        # Remove derived records for generated graph documents indexed before exclusion.
+        # The source files remain untouched.
+        for path in [path for path in known if _generated_graft_path(path)]:
+            conn.execute("DELETE FROM chunks WHERE source_kind = 'pack' AND path = ?", (path,))
+            conn.execute("DELETE FROM files WHERE path = ?", (path,))
+            known.pop(path, None)
         changed = [path for path, meta in current.items() if known.get(path) != (meta[0], meta[1])]
         removed = [path for path in known if path not in current]
 
         for path in removed:
-            conn.execute("DELETE FROM chunks WHERE path = ?", (path,))
+            conn.execute("DELETE FROM chunks WHERE source_kind = 'pack' AND path = ?", (path,))
             conn.execute("DELETE FROM files WHERE path = ?", (path,))
         total = len(changed)
         _set_progress("Indexing pack docs", 0, total)
         for index, path in enumerate(changed, start=1):
-            conn.execute("DELETE FROM chunks WHERE path = ?", (path,))
             try:
                 with open(path, "r", encoding="utf-8", errors="replace") as handle:
                     text = handle.read()
@@ -321,7 +367,7 @@ def index_local() -> int:
                 ("pack", pack, pack, path, "", title, heading, content)
                 for heading, content in _chunks_for_text(text)
             ]
-            _insert_chunks(conn, records)
+            _sync_chunks(conn, records, "source_kind = 'pack' AND path = ?", (path,))
             conn.execute("INSERT OR REPLACE INTO files (path, mtime, size) VALUES (?, ?, ?)", (path, mtime, size))
             if index % 25 == 0 or index == total:
                 _set_progress("Indexing pack docs", index, total)
@@ -329,10 +375,6 @@ def index_local() -> int:
         return len(changed)
     finally:
         conn.close()
-
-
-def _node_info(node_type: str) -> dict[str, Any]:
-    return node_catalog.record(node_type)
 
 
 def _spec_text(spec: Any) -> str:
@@ -378,39 +420,73 @@ def _node_content(info: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def index_node_schemas() -> int:
-    mapping, _ = node_catalog.snapshot()
+def _collect_node_records() -> dict[str, dict[str, Any]]:
+    inventory = node_catalog.snapshot()
+    records = {}
+    _set_progress("Reading local node inventory", 0, len(inventory[0]))
+    for index, name in enumerate(inventory[0], 1):
+        try:
+            records[name] = node_catalog.record(name, inventory=inventory)
+        except Exception as exc:
+            records[name] = {"name": name, "available": True, "schema_error": str(exc)}
+        if index % 200 == 0 or index == len(inventory[0]):
+            _set_progress("Reading local node inventory", index, len(inventory[0]))
+    return records
+
+
+def _sync_chunks(conn, records, where: str, parameters=()) -> None:
+    """Reconcile a source scope without replacing unchanged IDs or vectors."""
+    existing = {}
+    for row in conn.execute(
+        "SELECT id, source_kind, source, pack, path, url, title, heading, content FROM chunks WHERE " + where,
+        parameters,
+    ):
+        existing.setdefault(tuple(row[1:]), []).append(row[0])
+    additions = []
+    for record in records:
+        ids = existing.get(tuple(record))
+        if ids:
+            ids.pop()
+        else:
+            additions.append(record)
+    conn.executemany("DELETE FROM chunks WHERE id = ?",
+                     ((chunk_id,) for ids in existing.values() for chunk_id in ids))
+    _insert_chunks(conn, additions)
+
+
+def index_node_schemas(node_records=None, chunking=None) -> int:
+    node_records = _collect_node_records() if node_records is None else node_records
     conn = _connect()
     try:
         _init(conn)
-        conn.execute("DELETE FROM chunks WHERE source_kind = 'node'")
-        conn.execute("DELETE FROM node_records")
         records = []
-        chunk_chars, chunk_overlap = _effective_chunk_chars()
-        total = len(mapping)
+        chunk_chars, chunk_overlap = chunking or _effective_chunk_chars()
+        total = len(node_records)
         _set_progress("Indexing node schemas", 0, total)
-        for index, node_type in enumerate(mapping, start=1):
-            try:
-                info = _node_info(node_type)
-                content = _node_content(info)
-            except Exception as exc:
-                info = {"name": node_type, "available": True, "schema_error": str(exc)}
-                content = ""
-            conn.execute("INSERT INTO node_records VALUES (?, ?)", (node_type, json.dumps(info)))
+        for index, (node_type, info) in enumerate(node_records.items(), start=1):
+            serialized = json.dumps(info, sort_keys=True)
+            conn.execute("INSERT INTO node_records VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET record=excluded.record "
+                         "WHERE record != excluded.record", (node_type, serialized))
             if info.get("schema_error"):
                 continue
+            content = _node_content(info)
             purpose = info.get("purpose", {}).get("text", "")
             if purpose and purpose != info.get("description"):
                 content += "\nSource docstring: " + purpose
-            module = str(info.get("python_module") or "")
-            pack = _pack_from_module(module)
+            pack = _pack_from_module(str(info.get("python_module") or ""))
             display = str(info.get("display_name") or node_type)
             category = str(info.get("category") or "")
             for _heading, piece in _chunks_for_text(content, chunk_chars, chunk_overlap):
                 records.append(("node", node_type, pack, None, "", display, category, piece))
             if index % 200 == 0 or index == total:
                 _set_progress("Indexing node schemas", index, total)
-        _insert_chunks(conn, records)
+        # Keep unavailable records for coverage diagnostics; only reconcile this inventory.
+        # Failed schemas must not leave old, apparently valid search chunks behind.
+        conn.execute("INSERT OR REPLACE INTO meta VALUES ('node_chunking', ?)",
+                     (json.dumps([chunk_chars, chunk_overlap]),))
+        conn.execute("CREATE TEMP TABLE current_nodes (name TEXT PRIMARY KEY)")
+        conn.executemany("INSERT INTO current_nodes VALUES (?)", ((name,) for name in node_records))
+        _sync_chunks(conn, records, "source_kind = 'node' AND source IN (SELECT name FROM current_nodes)")
         conn.commit()
         return len(records)
     finally:
@@ -455,19 +531,19 @@ def _workflow_summary(data: Any) -> str:
     return "\n".join(lines)
 
 
-def index_examples() -> int:
+def index_examples(chunking=None) -> int:
     roots = _custom_node_dirs()
     conn = _connect()
     try:
         _init(conn)
-        conn.execute("DELETE FROM chunks WHERE source_kind = 'example'")
         conn.execute("DELETE FROM node_examples")
         records = []
-        chunk_chars, chunk_overlap = _effective_chunk_chars()
+        chunk_chars, chunk_overlap = chunking or _effective_chunk_chars()
         _set_progress("Indexing example workflows", 0, 0)
         for root in roots:
             for dirpath, dirnames, filenames in os.walk(root):
-                dirnames[:] = [name for name in dirnames if name not in EXCLUDED_DIRS]
+                dirnames[:] = [name for name in dirnames if name not in EXCLUDED_DIRS
+                               and not _is_generated_graft_dir(os.path.join(dirpath, name))]
                 if not any(part.lower() in EXAMPLE_DIR_NAMES for part in os.path.relpath(dirpath, root).split(os.sep)):
                     continue
                 for name in filenames:
@@ -492,7 +568,7 @@ def index_examples() -> int:
                     title = os.path.splitext(name)[0]
                     for _heading, piece in _chunks_for_text(summary, chunk_chars, chunk_overlap):
                         records.append(("example", full, pack, full, "", title, "", piece))
-        _insert_chunks(conn, records)
+        _sync_chunks(conn, records, "source_kind = 'example'")
         conn.commit()
         return len(records)
     finally:
@@ -515,16 +591,15 @@ def _load_json(path: str) -> Any:
         return None
 
 
-def index_registry() -> int:
+def index_registry(chunking=None) -> int:
     manager = _manager_dir()
     if not manager:
         return 0
     conn = _connect()
     try:
         _init(conn)
-        conn.execute("DELETE FROM chunks WHERE source_kind IN ('registry', 'model')")
         records = []
-        chunk_chars, chunk_overlap = _effective_chunk_chars()
+        chunk_chars, chunk_overlap = chunking or _effective_chunk_chars()
 
         def add(kind, source, pack, path, url, title, content):
             for _heading, piece in _chunks_for_text(content, chunk_chars, chunk_overlap):
@@ -584,7 +659,7 @@ def index_registry() -> int:
                 content += f"\nReference: {reference}"
             add("model", name, "", None, reference, name, content)
 
-        _insert_chunks(conn, records)
+        _sync_chunks(conn, records, "source_kind IN ('registry', 'model')")
         conn.commit()
         return len(records)
     finally:
@@ -611,7 +686,6 @@ def _index_official_text(text: str) -> int:
     conn = _connect()
     try:
         _init(conn)
-        conn.execute("DELETE FROM chunks WHERE source_kind = 'official'")
         records = []
         for index, page in enumerate(pages, start=1):
             lines = page.split("\n")
@@ -628,7 +702,7 @@ def _index_official_text(text: str) -> int:
                 records.append(("official", url or title, "", None, url, title, heading, content))
             if index % 50 == 0 or index == total:
                 _set_progress("Indexing official docs", index, total)
-        _insert_chunks(conn, records)
+        _sync_chunks(conn, records, "source_kind = 'official' AND source NOT LIKE 'ext:%'")
         conn.commit()
         return len(records)
     finally:
@@ -672,7 +746,6 @@ def index_extended_official() -> int:
     conn = _connect()
     try:
         _init(conn)
-        conn.execute("DELETE FROM chunks WHERE source_kind = 'official' AND url LIKE 'ext:%'")
         records = []
         _set_progress("Indexing extended docs", 0, 0)
         try:
@@ -682,7 +755,8 @@ def index_extended_official() -> int:
                 records.append(("official", url, "", None, url, "ComfyUI README", heading, content))
         except Exception as exc:
             _debug_log("kb", "readme.fetch_error", level="warning", error=str(exc))
-        _insert_chunks(conn, records)
+            raise
+        _sync_chunks(conn, records, "source_kind = 'official' AND source LIKE 'ext:%'")
         conn.commit()
         return len(records)
     finally:
@@ -708,24 +782,45 @@ def _stat_stamp(path: str) -> list[Any]:
     return [stat.st_size, stat.st_mtime_ns]
 
 
-def _build_fingerprint() -> str:
+def _build_fingerprint(node_records=None, chunking=None, components=None, kb_config=None) -> str:
     """Cheap signature of everything the indexers depend on.
 
-    Used to skip a rebuild when nothing changed. Deliberately coarse: it reads the installed
-    node-type list, the Manager files' stats and the KB flags, not node sources or docs.
+    Build supplies the exact node records and chunking it will index. File stamps
+    detect local document/example changes; source and schema evidence is in the records.
     """
     parts: dict[str, Any] = {"version": KB_BUILD_VERSION}
-    try:
-        mapping, _ = node_catalog.snapshot()
-        parts["node_types"] = sorted(str(name) for name in mapping)
-    except Exception:
-        parts["node_types"] = []
+    if node_records is None:
+        try:
+            mapping, _ = node_catalog.snapshot()
+            parts["node_types"] = sorted(str(name) for name in mapping)
+        except Exception:
+            parts["node_types"] = []
+    if node_records is not None:
+        parts["node_types"] = sorted(node_records)
+        parts["node_records"] = hashlib.sha256(json.dumps(node_records, sort_keys=True, default=str).encode()).hexdigest()
+    parts["chunking"] = chunking
+    # Detect edits to existing docs/examples, not just changes to installed node names.
+    inputs = {}
+    for root in _custom_node_dirs():
+        for directory, dirs, files in os.walk(root):
+            dirs[:] = sorted(name for name in dirs if name not in EXCLUDED_DIRS
+                             and not _is_generated_graft_dir(os.path.join(directory, name)))
+            example_dir = any(part.lower() in EXAMPLE_DIR_NAMES for part in os.path.relpath(directory, root).split(os.sep))
+            for name in sorted(files):
+                if not name.lower().endswith(DOC_EXTENSIONS) and not (example_dir and name.lower().endswith(".json")):
+                    continue
+                path = os.path.join(directory, name)
+                if _generated_graft_path(path):
+                    continue
+                inputs[path] = _stat_stamp(path)
+    parts["local_files"] = inputs
+    parts["file_limit"] = _limit("kb_max_file_bytes", 0)
     manager = _manager_dir()
     parts["manager"] = {
         name: _stat_stamp(os.path.join(manager, name))
         for name in ("custom-node-list.json", "extension-node-map.json", "model-list.json")
     }
-    kb_config = _kb_config()
+    kb_config = _kb_config() if kb_config is None else kb_config
     embed = kb_config.get("embed", {}) or {}
     parts["flags"] = {
         "examples": bool(kb_config.get("examples", True)),
@@ -734,6 +829,9 @@ def _build_fingerprint() -> str:
         "embed_enabled": bool(embed.get("enabled", True)),
         "embed_model": str(embed.get("model") or ""),
     }
+    if components is not None:
+        components.update({name: hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+                           for name, value in parts.items()})
     return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -765,20 +863,13 @@ def _resolve_embed_model(config: Mapping[str, Any], model: str) -> str:
     if model:
         return model
     try:
-        import asyncio
-
-        candidates = asyncio.run(_providers_module().embedding_models(config))
+        return asyncio.run(_providers_module().resolve_embedding_model(config, model))
     except Exception:
         return ""
-    if not candidates:
-        return ""
-    for candidate in candidates:
-        if "nomic" in candidate.lower():
-            return candidate
-    return candidates[0]
 
 
-def index_embeddings() -> int:
+def index_embeddings(force_rebuild: bool = False) -> int:
+    _state["embed_error"] = ""
     config, model = _embed_settings()
     if config is None:
         return 0
@@ -786,67 +877,189 @@ def index_embeddings() -> int:
         providers = _providers_module()
     except Exception:
         return 0
-    import asyncio
-
     import numpy as np
 
     model = _resolve_embed_model(config, model)
     if not model:
         _state["embed_error"] = "No embedding model available for the configured provider."
+        _state["embed_reason"] = "Embedding model unavailable; existing vectors retained"
         return 0
     _state["embed_model"] = model
+    identity_fn = getattr(_providers_module(), "embedding_identity", None)
+    identity = identity_fn(config, model) if identity_fn else model
     try:
         window_tokens, budget_chars, window_source = asyncio.run(providers.embedding_limits(config, model))
-    except Exception:
-        window_tokens, budget_chars, window_source = 0, 0, "unknown"
-    _state["embed_window_tokens"] = window_tokens
-    _state["embed_window_source"] = window_source
-    _meta_set("embed_window_tokens", str(window_tokens))
-    _meta_set("embed_window_source", window_source)
-
+    except Exception as exc:
+        _state["embed_error"] = str(exc)
+        _state["embed_reason"] = "Embedding window unavailable; existing vectors retained"
+        return 0
     conn = _connect()
     try:
         _init(conn)
-        # If the embedding model changed, the stored vectors are from a different space (and may have
-        # a different dimension), so wipe them and re-embed everything.
-        previous = _meta_get("embed_model")
-        if previous and previous != model:
+        verified_identity = _meta_get("embed_window_verified_identity")
+        verified_tokens = int(_meta_get("embed_window_verified_tokens") or 0)
+        _state.update(embed_window_observed_tokens=window_tokens,
+                      embed_window_observed_source=window_source)
+        if window_source == "fallback" and verified_identity == identity and verified_tokens > 0:
+            window_tokens = verified_tokens
+            window_source = "last verified; fallback ignored"
+        elif window_source != "fallback":
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_window_verified_identity', ?)", (identity,))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_window_verified_tokens', ?)", (str(window_tokens),))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_window_tokens', ?)", (str(window_tokens),))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_window_source', ?)", (window_source,))
+            conn.commit()
+        _state["embed_window_tokens"] = window_tokens
+        _state["embed_window_source"] = window_source
+        previous_identity = _meta_get("embed_identity") or _meta_get("embed_model")
+        previous_model = _meta_get("embed_model")
+        model_changed = bool(previous_model and previous_model != model)
+        vector_count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        fragment_count = conn.execute("SELECT COUNT(*) FROM embedding_fragments").fetchone()[0]
+        _state.update(embed_current_identity=identity, embed_previous_identity=previous_identity,
+                      embed_endpoint_confirmation_required=False)
+        if force_rebuild:
             conn.execute("DELETE FROM embeddings")
+            conn.execute("DELETE FROM embedding_fragments")
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_model', ?)", (model,))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_identity', ?)", (identity,))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_input_policy', ?)", ('full-text-v1',))
             conn.commit()
             _vectors_cache.update({"count": -1, "ids": None, "matrix": None})
+            vector_count = 0
+            model_changed = False
+            _state["embed_reason"] = "Manual full vector rebuild requested"
+        elif previous_identity and previous_identity != identity and not model_changed:
+            if vector_count or fragment_count:
+                _state.update(embed_reason="Embedding server changed; compatibility confirmation required",
+                              embed_endpoint_confirmation_required=True)
+                _state["embed_error"] = "Embedding server changed; confirm reuse or request a full vector rebuild."
+                return vector_count
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_model', ?)", (model,))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_identity', ?)", (identity,))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_input_policy', ?)", ('full-text-v1',))
+            conn.commit()
+            _state["embed_reason"] = "Embedding server changed; indexing missing chunks"
+        elif model_changed and vector_count:
+            # Stage the replacement model's first successful batch before removing the old space.
+            _state["embed_reason"] = f"Model changed; rebuilding vectors for {model}"
+        elif not previous_identity:
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_model', ?)", (model,))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_identity', ?)", (identity,))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_input_policy', ?)", ('full-text-v1',))
+            conn.commit()
+            _state["embed_reason"] = ""
+        else:
+            _state["embed_reason"] = ""
         have = {row[0] for row in conn.execute("SELECT chunk_id FROM embeddings")}
+        if model_changed:
+            have = set()
         pending = [(row[0], row[1]) for row in conn.execute("SELECT id, content FROM chunks") if row[0] not in have]
         total = len(pending)
         if not total:
             _state["embedded"] = len(have)
+            _state["embed_reason"] = "Knowledge base embeddings are up to date"
             return _state["embedded"]
+        if model_changed:
+            _state["embed_reason"] = f"Model changed; rebuilding all {total} chunks"
+        else:
+            _state["embed_reason"] = (f"Resuming {total} pending chunks" if have else
+                                       f"Updating {total} new or changed chunks")
         _set_progress("Embedding chunks", 0, total)
         done = 0
         for start in range(0, total, EMBED_BATCH):
             batch = pending[start:start + EMBED_BATCH]
-            # Respect the embedding model's input window; FTS keeps the full chunk.
-            texts = [str(content)[:budget_chars] if budget_chars > 0 else str(content) for _, content in batch]
+            parts = [(chunk_id, part, text)
+                     for chunk_id, content in batch
+                     for part, text in enumerate(embedding_parts(str(content), window_tokens or 512))
+                     if text.strip()]
             try:
-                vectors = asyncio.run(providers.embed(config, texts, model))
+                vectors = []
+                for offset in range(0, len(parts), EMBED_BATCH):
+                    texts = [text for _, _, text in parts[offset:offset + EMBED_BATCH]]
+                    received = asyncio.run(providers.embed(config, texts, model))
+                    if len(received) != len(texts) or any(not vector for vector in received):
+                        raise ValueError("Embedding provider returned an incomplete batch; pending chunks will retry.")
+                    vectors.extend(received)
             except Exception as exc:
                 _state["embed_error"] = str(exc)
                 break
-            rows = []
-            for (chunk_id, _), vector in zip(batch, vectors):
-                if not vector:
-                    continue
+            if len(vectors) != len(parts) or any(not vector for vector in vectors):
+                _state["embed_error"] = "Embedding provider returned an incomplete batch; pending chunks will retry."
+                break
+            rows, fragments = [], []
+            seen = set()
+            for (chunk_id, part, _), vector in zip(parts, vectors):
                 array = np.asarray(vector, dtype="float32")
-                rows.append((int(chunk_id), int(array.shape[0]), array.tobytes()))
+                if array.ndim != 1 or not np.isfinite(array).all():
+                    raise ValueError("Embedding provider returned an invalid vector.")
+                row = (int(chunk_id), int(array.shape[0]), array.tobytes())
+                if chunk_id not in seen:
+                    rows.append(row)
+                    seen.add(chunk_id)
+                else:
+                    fragments.append((row[0], part, row[1], row[2]))
+            if len({row[1] for row in rows} | {row[2] for row in fragments}) > 1:
+                raise ValueError("Embedding provider returned inconsistent dimensions.")
             if rows:
+                if model_changed:
+                    conn.execute("DELETE FROM embeddings")
+                    conn.execute("DELETE FROM embedding_fragments")
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_model', ?)", (model,))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_identity', ?)", (identity,))
+                    conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_input_policy', ?)", ('full-text-v1',))
+                    model_changed = False
                 conn.executemany("INSERT OR REPLACE INTO embeddings (chunk_id, dim, vec) VALUES (?, ?, ?)", rows)
+                conn.executemany("INSERT OR REPLACE INTO embedding_fragments (chunk_id, part, dim, vec) VALUES (?, ?, ?, ?)", fragments)
                 conn.commit()
-            done += len(batch)
+            done += len(rows)
             _set_progress("Embedding chunks", done, total)
-        _meta_set("embed_model", model)
         _state["embedded"] = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        if not _state.get("embed_error"):
+            _state["embed_reason"] = "Knowledge base embeddings are up to date"
         return _state["embedded"]
     finally:
         conn.close()
+
+
+def confirm_embedding_compatibility(expected_previous: str, expected_current: str, current_model: str,
+                                    current_identity: str, action: str) -> bool:
+    """Apply an explicit compatibility choice only while both identities still match."""
+    if action not in {"reuse", "rebuild"} or current_identity != expected_current:
+        return False
+    with _lock:
+        if _state.get("building"):
+            return False
+        conn = _connect()
+        try:
+            _init(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            previous = conn.execute("SELECT value FROM meta WHERE key = 'embed_identity'").fetchone()
+            if not previous:
+                previous = conn.execute("SELECT value FROM meta WHERE key = 'embed_model'").fetchone()
+            stored = previous[0] if previous else ""
+            stored_model_row = conn.execute("SELECT value FROM meta WHERE key = 'embed_model'").fetchone()
+            stored_model = stored_model_row[0] if stored_model_row else ""
+            if stored != expected_previous or (action == "reuse" and stored_model != current_model):
+                conn.rollback()
+                return False
+            if action == "rebuild":
+                conn.execute("DELETE FROM embeddings")
+                conn.execute("DELETE FROM embedding_fragments")
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_model', ?)", (current_model,))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_identity', ?)", (current_identity,))
+            conn.execute("INSERT OR REPLACE INTO meta VALUES ('embed_input_policy', ?)", ('full-text-v1',))
+            conn.commit()
+            _vectors_cache.update({"count": -1, "ids": None, "matrix": None})
+            _state.update(embed_endpoint_confirmation_required=False, embed_error="",
+                          embed_reason=("Embedding server change accepted for the same model; existing vectors reused"
+                                        if action == "reuse" else "Manual full vector rebuild requested"))
+            return True
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
 
 _vectors_cache: dict[str, Any] = {"count": -1, "ids": None, "matrix": None}
@@ -864,7 +1077,10 @@ def _load_vectors(conn: sqlite3.Connection) -> tuple[Any, Any]:
             return _vectors_cache["ids"], _vectors_cache["matrix"]
     ids: list[int] = []
     vectors = []
-    for chunk_id, _dim, blob in conn.execute("SELECT chunk_id, dim, vec FROM embeddings"):
+    for chunk_id, _dim, blob in conn.execute(
+        "SELECT chunk_id, dim, vec FROM embeddings UNION ALL "
+        "SELECT chunk_id, dim, vec FROM embedding_fragments"
+    ):
         ids.append(int(chunk_id))
         vectors.append(np.frombuffer(blob, dtype="float32"))
     if not vectors:
@@ -890,37 +1106,47 @@ def _vector_search(conn: sqlite3.Connection, query: str, limit: int, source: str
         providers = _providers_module()
     except Exception:
         return []
-    import asyncio
-
     import numpy as np
 
     stored_model = conn.execute("SELECT value FROM meta WHERE key = 'embed_model'").fetchone()
-    if not stored_model or (model and model != stored_model[0]) or not str(query).strip():
+    stored_identity = conn.execute("SELECT value FROM meta WHERE key = 'embed_identity'").fetchone()
+    identity_fn = getattr(providers, "embedding_identity", None)
+    current_identity = identity_fn(config, stored_model[0]) if identity_fn and stored_model else (stored_model[0] if stored_model else "")
+    identity_mismatch = bool(stored_identity and stored_identity[0] != current_identity)
+    # Legacy indexes created before endpoint identities are safe only with legacy chat routing.
+    if not stored_identity and (config.get("embedding") or {}).get("provider"):
+        identity_mismatch = True
+    if (not stored_model or (model and model != stored_model[0]) or identity_mismatch or not str(query).strip()):
         return []
     model = stored_model[0]
     ids, matrix = _load_vectors(conn)
     if matrix is None:
         return []
     try:
-        _tokens, budget_chars, _source = asyncio.run(providers.embedding_limits(config, model))
+        tokens, _chars, _source = asyncio.run(providers.embedding_limits(config, model))
     except Exception:
-        budget_chars = 0
-    query_text = str(query)[:budget_chars] if budget_chars > 0 else str(query)
+        tokens = 512
     try:
-        vectors = asyncio.run(providers.embed(config, [query_text], model))
+        vectors = asyncio.run(providers.embed(config, [part for part in embedding_parts(str(query), tokens) if part.strip()], model))
     except Exception:
         return []
     if not vectors or not vectors[0]:
         return []
-    query_vec = np.asarray(vectors[0], dtype="float32")
-    if matrix.shape[1] != query_vec.shape[0]:
+    query_vec = np.asarray(vectors, dtype="float32")
+    if query_vec.ndim != 2 or matrix.shape[1] != query_vec.shape[1]:
         return []
-    query_vec /= np.linalg.norm(query_vec) + 1e-9
-    scores = matrix @ query_vec
+    query_vec /= np.linalg.norm(query_vec, axis=1, keepdims=True) + 1e-9
+    scores = np.full(len(ids), -np.inf)
+    for vector in query_vec:
+        scores = np.maximum(scores, matrix @ vector)
     order = np.argsort(-scores)
     results: list[tuple[int, dict[str, Any]]] = []
+    seen = set()
     for position in order:
         chunk_id = int(ids[position])
+        if chunk_id in seen:
+            continue
+        seen.add(chunk_id)
         row = conn.execute(
             "SELECT source_kind, source, pack, path, url, title, heading, content FROM chunks WHERE id = ?",
             (chunk_id,),
@@ -938,21 +1164,22 @@ def _vector_search(conn: sqlite3.Connection, query: str, limit: int, source: str
 def _refresh_counts() -> None:
     conn = _connect()
     try:
-        _init(conn)
-        _state["chunks"] = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        _state["files"] = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
-        for kind in ("pack", "node", "example", "registry", "model", "official"):
-            _state[f"{kind}_chunks"] = conn.execute(
-                "SELECT COUNT(*) FROM chunks WHERE source_kind = ?", (kind,)
-            ).fetchone()[0]
-        _state["embedded"] = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
-        _state["embed_model"] = _meta_get("embed_model")
-        window = _meta_get("embed_window_tokens")
-        _state["embed_window_tokens"] = int(window) if window else 0
-        _state["embed_window_source"] = _meta_get("embed_window_source")
-        fetched = _meta_get("official_fetched_at")
-        _state["official_fetched_at"] = float(fetched) if fetched else 0.0
-        _state["official_fetched_iso"] = _iso(_state["official_fetched_at"])
+        conn.execute("BEGIN")
+        counts = dict(conn.execute("SELECT source_kind, COUNT(*) FROM chunks GROUP BY source_kind"))
+        meta = dict(conn.execute("SELECT key, value FROM meta"))
+        values = {"chunks": sum(counts.values()),
+                  "files": conn.execute("SELECT COUNT(*) FROM files").fetchone()[0],
+                  "embedded": conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]}
+        values.update({f"{kind}_chunks": counts.get(kind, 0)
+                       for kind in ("pack", "node", "example", "registry", "model", "official")})
+        values.update(embed_model=meta.get("embed_model", ""),
+                      embed_identity_stored=meta.get("embed_identity", ""),
+                      embed_window_tokens=int(meta.get("embed_window_tokens") or 0),
+                      embed_window_source=meta.get("embed_window_source", ""),
+                      official_fetched_at=float(meta.get("official_fetched_at") or 0))
+        values["official_fetched_iso"] = _iso(values["official_fetched_at"])
+        with _lock:
+            _state.update(values)
     finally:
         conn.close()
 
@@ -984,7 +1211,29 @@ def compact(full: bool = True) -> dict[str, Any]:
     return {"before_mb": round(before / 1e6, 1), "after_mb": round(after / 1e6, 1), "freed_mb": round(freed / 1e6, 1)}
 
 
-def build(force: bool = False, force_official: bool = False, auto_official: bool = True, refresh_days: int = 7, delay: float = 0) -> None:
+def _run_extended_docs() -> None:
+    try:
+        index_extended_official()
+    except Exception as exc:
+        _state["error"] = f"extended docs: {exc}"
+        _meta_set("extended_docs_pending", "1")
+    else:
+        _meta_set("extended_docs_pending", "0")
+
+
+def _run_embeddings(force_rebuild: bool = False) -> None:
+    _refresh_counts()
+    try:
+        index_embeddings(force_rebuild=force_rebuild)
+    except Exception as exc:
+        _state["embed_error"] = str(exc)
+    if _state.get("embed_error"):
+        _state["error"] = f"embeddings: {_state['embed_error']}"
+    _vectors_cache["count"] = -1
+
+
+def build(force: bool = False, force_official: bool = False, auto_official: bool = True,
+          refresh_days: int = 7, delay: float = 0, force_embedding_rebuild: bool = False) -> None:
     if delay:
         time.sleep(delay)
     with _lock:
@@ -992,6 +1241,7 @@ def build(force: bool = False, force_official: bool = False, auto_official: bool
             return
         _state["building"] = True
         _state["error"] = ""
+        _state["embed_error"] = ""
     started = time.time()
     _debug_log("kb", "build.start", force=force, force_official=force_official, auto_official=auto_official)
     try:
@@ -1003,26 +1253,26 @@ def build(force: bool = False, force_official: bool = False, auto_official: bool
 
         # Skip the whole rebuild when nothing the indexers depend on has changed. Official docs
         # still follow their own staleness timer.
-        fingerprint = _build_fingerprint()
+        _refresh_counts()
+        node_records = _collect_node_records()
+        chunking = _effective_chunk_chars(refresh=force)
+        components = {}
+        kb_config = _kb_config()
+        fingerprint = _build_fingerprint(node_records, chunking, components, kb_config)
         stored = _meta_get("build_fingerprint")
         if not force and fingerprint and stored == fingerprint:
-            fetched = False
             if auto_official:
                 fetched_at = float(_meta_get("official_fetched_at") or 0)
                 stale = (time.time() - fetched_at) > max(1, refresh_days) * 86400
                 if force_official or not fetched_at or stale:
                     try:
-                        fetched = fetch_official(force=True)
+                        fetch_official(force=True)
                     except Exception as exc:
                         _state["error"] = f"official docs: {exc}"
-            if fetched:
-                # A docs refresh replaced the official chunks, so their vectors are gone. Embed
-                # just those; everything else stays untouched.
-                try:
-                    index_embeddings()
-                except Exception as exc:
-                    _state["error"] = f"embeddings: {exc}"
-                _vectors_cache["count"] = -1
+            if kb_config.get("extended_official", True) and (force_official or _meta_get("extended_docs_pending") == "1"):
+                _run_extended_docs()
+            # Resume unfinished vectors even when structural inputs are unchanged.
+            _run_embeddings(force_rebuild=force_embedding_rebuild)
             _refresh_counts()
             _state["last_build"] = time.time()
             _state["last_build_iso"] = _iso(_state["last_build"])
@@ -1030,13 +1280,19 @@ def build(force: bool = False, force_official: bool = False, auto_official: bool
             _debug_log("kb", "build.skipped", fingerprint=fingerprint, error=_state.get("error") or None)
             return
 
+        try:
+            previous_components = json.loads(_meta_get("build_components") or "{}")
+        except ValueError:
+            previous_components = {}
+        changed_components = sorted(name for name, value in components.items() if previous_components.get(name) != value)
+        _debug_log("kb", "build.reason", changed=changed_components, reason="forced" if force else "inputs_changed" if stored else "first_build",
+                   previous=stored, current=fingerprint, nodes=len(node_records))
         index_local()
-        index_node_schemas()
-        kb_config = _kb_config()
+        index_node_schemas(node_records, chunking)
         if kb_config.get("examples", True):
-            index_examples()
+            index_examples(chunking)
         if kb_config.get("registry", True):
-            index_registry()
+            index_registry(chunking)
         if auto_official:
             fetched_at = float(_meta_get("official_fetched_at") or 0)
             stale = (time.time() - fetched_at) > max(1, refresh_days) * 86400
@@ -1046,15 +1302,8 @@ def build(force: bool = False, force_official: bool = False, auto_official: bool
                 except Exception as exc:
                     _state["error"] = f"official docs: {exc}"
         if kb_config.get("extended_official", True):
-            try:
-                index_extended_official()
-            except Exception as exc:
-                _state["error"] = f"extended docs: {exc}"
-        try:
-            index_embeddings()
-        except Exception as exc:
-            _state["error"] = f"embeddings: {exc}"
-        _vectors_cache["count"] = -1
+            _run_extended_docs()
+        _run_embeddings(force_rebuild=force_embedding_rebuild)
         _refresh_counts()
         try:
             if _freelist_pages() > 5000:
@@ -1065,8 +1314,9 @@ def build(force: bool = False, force_official: bool = False, auto_official: bool
         except Exception as exc:
             _debug_log("kb", "compact.error", level="warning", error=str(exc))
         # Structural indexing completed, so record the fingerprint even if docs/embeddings hit
-        # a transient error (those are retried on their own schedule) — otherwise an offline
+        # a transient error (pending embeddings resume even on the skip path) — otherwise an offline
         # machine would rebuild the whole index on every start.
+        _meta_set("build_components", json.dumps(components, sort_keys=True))
         _meta_set("build_fingerprint", fingerprint)
         _state["last_build"] = time.time()
         _state["last_build_iso"] = _iso(_state["last_build"])
@@ -1095,6 +1345,7 @@ def start_background(
     refresh_days: int = 7,
     force_official: bool = False,
     delay: float = 0,
+    force_embedding_rebuild: bool = False,
 ) -> None:
     thread = threading.Thread(
         target=build,
@@ -1104,6 +1355,7 @@ def start_background(
             "auto_official": auto_official,
             "refresh_days": refresh_days,
             "delay": delay,
+            "force_embedding_rebuild": force_embedding_rebuild,
         },
         name="ComfyUIAssistantKB",
         daemon=True,
@@ -1112,13 +1364,10 @@ def start_background(
 
 
 def status() -> dict[str, Any]:
-    with _lock:
-        building = _state["building"]
-    if not building:
-        try:
-            _refresh_counts()
-        except Exception:
-            pass
+    try:
+        _refresh_counts()
+    except Exception:
+        pass
     with _lock:
         result = dict(_state)
     result["coverage"] = node_coverage()
@@ -1128,7 +1377,6 @@ def status() -> dict[str, Any]:
 def node_coverage() -> dict[str, Any]:
     conn = _connect()
     try:
-        _init(conn)
         records = {name: {"schema_error": error, "purpose": {"text": purpose}} for name, error, purpose in conn.execute(
             "SELECT name, json_extract(record, '$.schema_error'), json_extract(record, '$.purpose.text') FROM node_records")}
         try:
@@ -1143,6 +1391,8 @@ def node_coverage() -> dict[str, Any]:
                              if name in registered and record.get("schema_error")],
                 "unknown_purpose": sorted(name for name in valid & registered if not records[name].get("purpose", {}).get("text")),
                 "scope": "Nodes registered in this ComfyUI session; disabled or failed-to-load packages are not available nodes."}
+    except sqlite3.OperationalError as exc:
+        return {"registry_available": False, "error": str(exc), "indexed": 0}
     finally:
         conn.close()
 
@@ -1176,14 +1426,6 @@ def _row_to_result(row: Any, query: str) -> dict[str, Any]:
         "heading": row[6] or "",
         "snippet": _snippet(row[7], query),
     }
-
-
-def _wanted(limit: Any) -> int:
-    try:
-        value = int(limit)
-    except (TypeError, ValueError):
-        return 0
-    return value if value > 0 else 0
 
 
 def _fts_rows(conn: sqlite3.Connection, query: str, limit: int, source: str | None) -> list[tuple[int, dict[str, Any]]]:

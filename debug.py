@@ -10,23 +10,17 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
+try:
+    from .storage import configured_limit as _limit
+except ImportError:
+    from storage import configured_limit as _limit
+
 NODE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_PATH = os.path.join(NODE_DIR, "debug.log")
 SCHEMA_VERSION = 1
 
 _lock = threading.RLock()
 _events: deque[dict[str, Any]] | None = None
-
-
-def _limit(name: str, default: int = 0) -> int:
-    try:
-        try:
-            from .config_store import CONFIG_STORE
-        except ImportError:
-            from config_store import CONFIG_STORE
-        return CONFIG_STORE.get_limit(name, default)
-    except Exception:
-        return default
 
 
 def _buffer() -> deque[dict[str, Any]]:

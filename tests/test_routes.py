@@ -74,6 +74,27 @@ class RouteValidationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 400)
         self.config.resolved.assert_not_called()
 
+    def test_chat_request_thinking_selection_overrides_only_thinking_fields(self):
+        self.config.resolved.return_value = {"provider": "strata", "thinking": {"enabled": False, "level": "auto"},
+                                             "temperature": 0.2}
+        config = self.routes_module._effective_config({"thinking": {"level": "low"}})
+        self.assertEqual(config["thinking"], {"enabled": False, "level": "low"})
+        self.assertEqual(config["temperature"], 0.2)
+
+    async def test_kb_starts_lazily_only_when_enabled(self):
+        request = Mock()
+        self.config.resolved.return_value = {"kb": {"enabled": False}}
+        with patch.object(self.routes_module.kb, "start_background") as start:
+            response = await self.handler("kb_start")(request)
+        self.assertFalse(json.loads(response.text)["started"])
+        start.assert_not_called()
+
+        self.config.resolved.return_value = {"kb": {"enabled": True, "auto_official": False, "refresh_days": 3}}
+        with patch.object(self.routes_module.kb, "start_background") as start:
+            response = await self.handler("kb_start")(request)
+        self.assertTrue(json.loads(response.text)["started"])
+        start.assert_called_once_with(auto_official=False, refresh_days=3)
+
     async def test_experience_record_scrubs_and_stores(self):
         self.config.resolved.return_value = {}
         with patch.object(self.routes_module.experience, "add_experience",

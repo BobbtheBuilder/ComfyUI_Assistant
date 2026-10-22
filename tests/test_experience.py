@@ -79,6 +79,14 @@ class ExperienceStoreTest(unittest.TestCase):
         self.assertEqual(results[0]["task"], "dark moody portrait")
         self.assertEqual(experience.search("", 8, [0.1, 0.2, 0.3]), [])
 
+    def test_endpoint_change_invalidates_only_derived_vectors(self):
+        saved = experience.add_experience({"kind": "success", "task": "retain this source record"})
+        experience.ensure_embed_model("same-model", "openai|http://embed-a/v1|same-model")
+        self.assertTrue(experience.set_vector(saved["id"], [1.0, 0.0]))
+        experience.ensure_embed_model("same-model", "openai|http://embed-b/v1|same-model")
+        self.assertEqual(experience.vector_stats()["embedded"], 0)
+        self.assertEqual(experience.list_experiences()[0]["task"], "retain this source record")
+
     def test_relevant_prefers_approved_successes(self):
         approved = experience.add_experience({
             "kind": "success",

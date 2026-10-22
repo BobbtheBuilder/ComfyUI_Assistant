@@ -32,6 +32,16 @@ def _effective_config(payload: Any) -> dict[str, Any]:
                 config[key] = payload[key]
         if payload.get("api_key"):
             config["api_key"] = payload["api_key"]
+        if isinstance(payload.get("thinking"), Mapping):
+            thinking = config.setdefault("thinking", {})
+            for key in ("enabled", "level"):
+                if key in payload["thinking"]:
+                    thinking[key] = payload["thinking"][key]
+        if isinstance(payload.get("embedding"), Mapping):
+            embedding = config.setdefault("embedding", {})
+            for key, value in payload["embedding"].items():
+                if key != "api_key" or value:
+                    embedding[key] = value
         if isinstance(payload.get("websearch"), Mapping):
             for key, value in payload["websearch"].items():
                 if value:
@@ -58,28 +68,32 @@ def _memory_embed_settings(config: Mapping[str, Any]) -> Mapping[str, Any] | Non
     return embed
 
 
-async def _lesson_vector(config: Mapping[str, Any], text: str) -> list[float] | None:
-    """Best-effort embedding for a lesson or query. Never raises into the request."""
+async def _store_vector(config: Mapping[str, Any], text: str, store) -> list[float] | None:
+    """Best-effort embedding shared by lesson and experience retrieval."""
     embed = _memory_embed_settings(config)
     text = str(text or "").strip()
     if embed is None or not text:
         return None
-    model = await providers.resolve_embedding_model(config, str(embed.get("model") or ""))
-    if not model:
-        return None
-    await asyncio.to_thread(memory.ensure_embed_model, model)
     try:
-        _tokens, budget_chars, _source = await providers.embedding_limits(config, model)
-        if budget_chars > 0:
-            text = text[:budget_chars]
-    except Exception:
-        pass
-    try:
-        vectors = await providers.embed(config, [text], model)
+        connection = providers.embedding_connection(config)
+        model = await providers.resolve_embedding_model(connection, str(embed.get("model") or ""))
+        if not model:
+            return None
+        identity = providers.embedding_identity(connection, model)
+        await asyncio.to_thread(store.ensure_embed_model, model, identity)
+        vectors = await providers.embed(connection, [text], model)
+        await asyncio.to_thread(store.set_embed_error, "")
+        return vectors[0] if vectors else None
     except Exception as exc:
-        await asyncio.to_thread(memory.set_embed_error, str(exc))
+        try:
+            await asyncio.to_thread(store.set_embed_error, str(exc))
+        except Exception:
+            pass
         return None
-    return vectors[0] if vectors else None
+
+
+async def _lesson_vector(config: Mapping[str, Any], text: str) -> list[float] | None:
+    return await _store_vector(config, text, memory)
 
 
 def _experience_embed_text(record: Mapping[str, Any]) -> str:
@@ -90,27 +104,7 @@ def _experience_embed_text(record: Mapping[str, Any]) -> str:
 
 
 async def _experience_vector(config: Mapping[str, Any], text: str) -> list[float] | None:
-    """Experience retrieval reuses the memory embedding settings."""
-    embed = _memory_embed_settings(config)
-    text = str(text or "").strip()
-    if embed is None or not text:
-        return None
-    model = await providers.resolve_embedding_model(config, str(embed.get("model") or ""))
-    if not model:
-        return None
-    await asyncio.to_thread(experience.ensure_embed_model, model)
-    try:
-        _tokens, budget_chars, _source = await providers.embedding_limits(config, model)
-        if budget_chars > 0:
-            text = text[:budget_chars]
-    except Exception:
-        pass
-    try:
-        vectors = await providers.embed(config, [text], model)
-    except Exception as exc:
-        await asyncio.to_thread(experience.set_embed_error, str(exc))
-        return None
-    return vectors[0] if vectors else None
+    return await _store_vector(config, text, experience)
 
 
 @routes.get("/chatbot/config")
@@ -130,7 +124,11 @@ async def set_config(request: web.Request) -> web.Response:
 @routes.get("/chatbot/history")
 async def get_history(request: web.Request) -> web.Response:
     key = request.query.get("key") or "__default__"
-    return web.json_response({"history": CONFIG_STORE.history(key)})
+    try:
+        history = await asyncio.to_thread(CONFIG_STORE.history, key)
+    except (ValueError, OSError):
+        return web.json_response({"error": "Could not read saved chat history. The file has been preserved."}, status=500)
+    return web.json_response({"history": history})
 
 
 @routes.post("/chatbot/history")
@@ -143,7 +141,10 @@ async def set_history(request: web.Request) -> web.Response:
     messages = payload.get("messages", [])
     if not isinstance(messages, list):
         return web.json_response({"error": "Messages must be a JSON array."}, status=400)
-    CONFIG_STORE.set_history(key, messages)
+    try:
+        await asyncio.to_thread(CONFIG_STORE.set_history, key, messages)
+    except (ValueError, OSError):
+        return web.json_response({"error": "Could not save chat history. Existing history has been preserved."}, status=500)
     return web.json_response({"ok": True})
 
 
@@ -285,7 +286,19 @@ async def web_search(request: web.Request) -> web.Response:
 
 @routes.get("/chatbot/kb/status")
 async def kb_status(_request: web.Request) -> web.Response:
-    return web.json_response({"status": kb.status()})
+    return web.json_response({"status": await asyncio.to_thread(kb.status)})
+
+
+@routes.post("/chatbot/kb/start")
+async def kb_start(_request: web.Request) -> web.Response:
+    config = CONFIG_STORE.resolved().get("kb", {})
+    if not config.get("enabled", True):
+        return web.json_response({"started": False, "reason": "disabled"})
+    kb.start_background(
+        auto_official=bool(config.get("auto_official", True)),
+        refresh_days=int(config.get("refresh_days", 7)),
+    )
+    return web.json_response({"started": True})
 
 
 @routes.post("/chatbot/kb/compact")
@@ -294,7 +307,7 @@ async def kb_compact(_request: web.Request) -> web.Response:
         result = await asyncio.to_thread(kb.compact, True)
     except Exception as exc:
         return web.json_response({"error": str(exc)}, status=500)
-    return web.json_response({"result": result, "status": kb.status()})
+    return web.json_response({"result": result, "status": await asyncio.to_thread(kb.status)})
 
 
 @routes.post("/chatbot/kb/rebuild")
@@ -306,8 +319,41 @@ async def kb_rebuild(request: web.Request) -> web.Response:
     config = _effective_config(payload).get("kb", {})
     auto_official = bool(payload.get("auto_official", config.get("auto_official", True)))
     refresh_days = int(payload.get("refresh_days", config.get("refresh_days", 7)))
-    kb.start_background(force=True, auto_official=auto_official, refresh_days=refresh_days, force_official=True)
-    return web.json_response({"status": kb.status()})
+    kb.start_background(force=True, auto_official=auto_official, refresh_days=refresh_days,
+                         force_official=True, force_embedding_rebuild=True)
+    return web.json_response({"status": await asyncio.to_thread(kb.status)})
+
+
+@routes.post("/chatbot/kb/embedding/confirm")
+async def kb_embedding_confirm(request: web.Request) -> web.Response:
+    try:
+        payload = await _json_object(request)
+    except json.JSONDecodeError:
+        return web.json_response({"error": "Invalid JSON body."}, status=400)
+    action = str(payload.get("action") or "")
+    expected_previous = str(payload.get("previous_identity") or "")
+    expected_current = str(payload.get("current_identity") or "")
+    config, configured_model = kb._embed_settings()
+    if config is None or not expected_previous or not expected_current or action not in {"reuse", "rebuild"}:
+        return web.json_response({"error": "Embedding compatibility details are missing or stale."}, status=409)
+    connection = providers.embedding_connection(config)
+    model = await providers.resolve_embedding_model(connection, configured_model)
+    if not model:
+        return web.json_response({"error": "The configured embedding model is unavailable."}, status=409)
+    identity = providers.embedding_identity(connection, model)
+    latest_config, latest_configured_model = kb._embed_settings()
+    if latest_config is None or latest_configured_model != configured_model:
+        return web.json_response({"error": "Embedding settings changed; refresh status before confirming."}, status=409)
+    latest_connection = providers.embedding_connection(latest_config)
+    if providers.embedding_identity(latest_connection, model) != identity:
+        return web.json_response({"error": "Embedding settings changed; refresh status before confirming."}, status=409)
+    accepted = await asyncio.to_thread(
+        kb.confirm_embedding_compatibility, expected_previous, expected_current, model, identity, action
+    )
+    if not accepted:
+        return web.json_response({"error": "Embedding settings changed; refresh status before confirming."}, status=409)
+    kb.start_background(auto_official=False, force_embedding_rebuild=(action == "rebuild"))
+    return web.json_response({"status": await asyncio.to_thread(kb.status)})
 
 
 @routes.post("/chatbot/kb/sync_official")
@@ -319,7 +365,7 @@ async def kb_sync_official(request: web.Request) -> web.Response:
     config = _effective_config(payload).get("kb", {})
     refresh_days = int(payload.get("refresh_days", config.get("refresh_days", 7)))
     kb.start_background(auto_official=True, refresh_days=refresh_days, force_official=True)
-    return web.json_response({"status": kb.status()})
+    return web.json_response({"status": await asyncio.to_thread(kb.status)})
 
 
 @routes.post("/chatbot/docs/search")
@@ -440,15 +486,17 @@ async def memory_reindex(_request: web.Request) -> web.Response:
     config = CONFIG_STORE.resolved()
     if _memory_embed_settings(config) is None:
         return web.json_response({"indexed": 0, "reason": "disabled", "embedding": await asyncio.to_thread(memory.vector_stats)})
-    model = await providers.resolve_embedding_model(config, str((config.get("memory", {}).get("embed") or {}).get("model") or ""))
+    connection = providers.embedding_connection(config)
+    model = await providers.resolve_embedding_model(connection, str((config.get("memory", {}).get("embed") or {}).get("model") or ""))
     if not model:
         return web.json_response({"indexed": 0, "reason": "no embedding model", "embedding": await asyncio.to_thread(memory.vector_stats)})
-    await asyncio.to_thread(memory.ensure_embed_model, model)
+    identity = providers.embedding_identity(connection, model)
+    await asyncio.to_thread(memory.ensure_embed_model, model, identity)
     pending = await asyncio.to_thread(memory.pending_lessons)
     indexed = 0
     try:
         for lesson_id, text in pending:
-            vectors = await providers.embed(config, [text], model)
+            vectors = await providers.embed(connection, [text], model)
             if vectors and vectors[0]:
                 await asyncio.to_thread(memory.set_vector, lesson_id, vectors[0])
                 indexed += 1
@@ -588,19 +636,21 @@ async def experience_reindex(_request: web.Request) -> web.Response:
             {"indexed": 0, "reason": "disabled", "embedding": await asyncio.to_thread(experience.vector_stats)}
         )
     embed = config.get("memory", {}).get("embed", {}) or {}
-    model = await providers.resolve_embedding_model(config, str(embed.get("model") or ""))
+    connection = providers.embedding_connection(config)
+    model = await providers.resolve_embedding_model(connection, str(embed.get("model") or ""))
     if not model:
         return web.json_response(
             {"indexed": 0, "reason": "no embedding model", "embedding": await asyncio.to_thread(experience.vector_stats)}
         )
-    await asyncio.to_thread(experience.ensure_embed_model, model)
+    identity = providers.embedding_identity(connection, model)
+    await asyncio.to_thread(experience.ensure_embed_model, model, identity)
     pending = await asyncio.to_thread(experience.pending_experiences)
     indexed = 0
     try:
         for experience_id, text in pending:
             if not text.strip():
                 continue
-            vectors = await providers.embed(config, [text], model)
+            vectors = await providers.embed(connection, [text], model)
             if vectors and vectors[0]:
                 await asyncio.to_thread(experience.set_vector, experience_id, vectors[0])
                 indexed += 1

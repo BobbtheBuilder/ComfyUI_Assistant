@@ -38,6 +38,7 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 DEFAULT_BASE_URLS = {
+    "strata": "http://p40:8080/v1",
     "lmstudio": "http://127.0.0.1:1234/v1",
     "ollama": "http://127.0.0.1:11434/v1",
     "openai": "https://api.openai.com/v1",
@@ -49,11 +50,13 @@ DEFAULTS: dict[str, Any] = {
     "base_url": "",
     "api_key": "",
     "model": "",
+    "embedding": {"provider": "", "base_url": "", "api_key": "", "model": ""},
     "temperature": 0.7,
     "max_tokens": 0,
     "use_native_tools": True,
     "thinking": {
         "enabled": True,
+        "level": "auto",
     },
     "system_prompt": DEFAULT_SYSTEM_PROMPT,
     "websearch": {
@@ -108,7 +111,11 @@ DEFAULTS: dict[str, Any] = {
     },
     # 0 means "no cap" everywhere a limit is read. Only set a value on purpose.
     "limits": {
+        # ComfyUI's fetchApi has a 60-second default; 0 disables that deadline for
+        # assistant requests so model loading and first-token latency can complete.
+        "assistant_fetch_timeout_ms": 0,
         "window_cache_ttl": 0,
+        "embedding_idle_unload_seconds": 60,
         "error_detail_chars": 0,
         "source_excerpt_chars": 0,
         "widget_chars": 0,
@@ -179,6 +186,17 @@ def _merge_config(target: dict[str, Any], values: Mapping[str, Any], defaults: M
             target[key] = deepcopy(value)
 
 
+def _normalize_thinking(config: dict[str, Any]) -> None:
+    thinking = config.get("thinking")
+    if not isinstance(thinking, dict):
+        config["thinking"] = {"enabled": True, "level": "auto"}
+        return
+    level = str(thinking.get("level") or "auto").strip().lower()
+    thinking["level"] = level if level in {"auto", "off", "low", "medium", "high"} else "auto"
+    if thinking.get("enabled") is not False:
+        thinking["enabled"] = True
+
+
 class ConfigStore:
     def __init__(self, path: str = CONFIG_PATH, history_path: str = HISTORY_PATH):
         self._path = path
@@ -191,6 +209,7 @@ class ConfigStore:
         stored = _read_json(self._path)
         if isinstance(stored, dict):
             _merge_config(config, stored, DEFAULTS)
+        _normalize_thinking(config)
         return config
 
     def snapshot(self, include_secrets: bool = False) -> dict[str, Any]:
@@ -201,6 +220,9 @@ class ConfigStore:
         if not include_secrets:
             config["api_key_configured"] = bool(config.get("api_key"))
             config["api_key"] = ""
+            embedding = config.get("embedding", {}) or {}
+            embedding["api_key_configured"] = bool(embedding.get("api_key"))
+            embedding["api_key"] = ""
             websearch = config.get("websearch", {})
             websearch["api_key_configured"] = bool(websearch.get("api_key"))
             websearch["api_key"] = ""
@@ -212,6 +234,7 @@ class ConfigStore:
         with self._lock:
             config = deepcopy(self._config)
             _merge_config(config, values, DEFAULTS)
+            _normalize_thinking(config)
             _write_json(self._path, config)
             self._config = config
             return self.snapshot(include_secrets=False)
@@ -236,16 +259,26 @@ class ConfigStore:
             return default
 
     def history(self, key: str = "__default__") -> list[Any]:
-        stored = _read_json(self._history_path)
-        if not isinstance(stored, dict):
-            return []
-        messages = stored.get(key)
-        return messages if isinstance(messages, list) else []
+        with self._lock:
+            return self._history_data().get(key, [])
+
+    def _history_data(self) -> dict[str, list[Any]]:
+        # A damaged history file is not an empty history. Never silently replace
+        # it on the next save; leave it intact for recovery.
+        try:
+            with open(self._history_path, "r", encoding="utf-8") as handle:
+                stored = json.load(handle)
+        except FileNotFoundError:
+            return {}
+        if not isinstance(stored, dict) or any(not isinstance(value, list) for value in stored.values()):
+            raise ValueError("History file must map workflow keys to message arrays.")
+        return stored
 
     def set_history(self, key: str, messages: list[Any]) -> None:
         with self._lock:
-            stored = _read_json(self._history_path)
-            data = stored if isinstance(stored, dict) else {}
+            if not isinstance(messages, list):
+                raise ValueError("History messages must be an array.")
+            data = self._history_data()
             if isinstance(messages, list) and messages:
                 data[key] = messages
             else:

@@ -9,9 +9,9 @@ import time
 from typing import Any
 
 try:
-    from .storage import connect, fts_query
+    from .storage import connect, fts_query, fuse_ranked as _fuse, wanted as _wanted
 except ImportError:
-    from storage import connect, fts_query
+    from storage import connect, fts_query, fuse_ranked as _fuse, wanted as _wanted
 
 NODE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(NODE_DIR, "assistant_memory.sqlite")
@@ -58,6 +58,10 @@ def _init(conn: sqlite3.Connection) -> None:
         CREATE TRIGGER IF NOT EXISTS lessons_au AFTER UPDATE ON lessons BEGIN
             INSERT INTO lessons_fts(lessons_fts, rowid, text, tags) VALUES ('delete', old.id, old.text, old.tags);
             INSERT INTO lessons_fts(rowid, text, tags) VALUES (new.id, new.text, new.tags);
+        END;
+        CREATE TRIGGER IF NOT EXISTS lessons_vectors_au AFTER UPDATE OF text ON lessons
+        WHEN old.text != new.text BEGIN
+            DELETE FROM lesson_vectors WHERE lesson_id = old.id;
         END;
         CREATE TABLE IF NOT EXISTS lesson_vectors (
             lesson_id INTEGER PRIMARY KEY,
@@ -168,19 +172,24 @@ def stored_embed_model() -> str:
             conn.close()
 
 
-def ensure_embed_model(model: str) -> None:
-    """Drop stored vectors when the embedding model changes (different vector space)."""
+def ensure_embed_model(model: str, identity: str | None = None) -> None:
+    """Drop derived vectors when their embedding connection or model changes."""
     model = str(model or "")
+    identity = str(identity or model)
     with _lock:
         conn = _connect()
         try:
             _init(conn)
-            row = conn.execute("SELECT value FROM meta WHERE key = 'lesson_embed_model'").fetchone()
-            if (row[0] if row else "") != model:
+            row = conn.execute("SELECT value FROM meta WHERE key = 'lesson_embed_identity'").fetchone()
+            if (row[0] if row else "") != identity:
                 conn.execute("DELETE FROM lesson_vectors")
                 conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('lesson_embed_model', ?)", (model,))
+                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('lesson_embed_identity', ?)", (identity,))
                 conn.commit()
                 _vectors_cache.update({"key": None, "count": -1, "ids": None, "matrix": None})
+            else:
+                conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('lesson_embed_model', ?)", (model,))
+                conn.commit()
         finally:
             conn.close()
 
@@ -205,6 +214,8 @@ def set_vector(lesson_id: int, vector: Any) -> bool:
         conn = _connect()
         try:
             _init(conn)
+            if not conn.execute("SELECT 1 FROM lessons WHERE id = ?", (int(lesson_id),)).fetchone():
+                return False
             _store_vector(conn, int(lesson_id), vector)
             conn.commit()
             return True
@@ -304,27 +315,6 @@ def _vector_results(conn: sqlite3.Connection, query_vec: Any, limit: int) -> lis
             continue
         results.append((lesson_id, item))
     return results
-
-
-def _fuse(ranked_lists: list[list[tuple[int, dict[str, Any]]]], limit: int) -> list[dict[str, Any]]:
-    scores: dict[int, float] = {}
-    items: dict[int, dict[str, Any]] = {}
-    for ranked in ranked_lists:
-        for rank, (lesson_id, item) in enumerate(ranked):
-            scores[lesson_id] = scores.get(lesson_id, 0.0) + 1.0 / (60 + rank)
-            items.setdefault(lesson_id, item)
-    ordered = sorted(scores, key=lambda lesson_id: -scores[lesson_id])
-    if limit and limit > 0:
-        ordered = ordered[:limit]
-    return [items[lesson_id] for lesson_id in ordered]
-
-
-def _wanted(limit: Any) -> int:
-    try:
-        value = int(limit)
-    except (TypeError, ValueError):
-        return 0
-    return value if value > 0 else 0
 
 
 def list_lessons(enabled_only: bool = False) -> list[dict[str, Any]]:

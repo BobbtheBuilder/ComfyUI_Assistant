@@ -485,10 +485,13 @@ function buildUi() {
           <div class="ccb-messages"></div>
           <div class="ccb-attachments" id="ccb-attachments"></div>
           <div class="ccb-composer">
-            <button class="ccb-attach-btn" id="ccb-attach" title="Attach image">&#128206;</button>
             <textarea class="ccb-input" rows="1" placeholder="Ask about your workflow..."></textarea>
-            <button class="ccb-new-btn" id="ccb-new" title="Start a new chat for this workflow">New</button>
-            <button class="ccb-send">Send</button>
+            <div class="ccb-composer-controls">
+              <button class="ccb-attach-btn" id="ccb-attach" title="Attach image">&#128206;</button>
+              <select class="ccb-thinking-level" id="ccb-thinking-level" aria-label="Thinking level" title="Thinking level for the next request"></select>
+              <button class="ccb-new-btn" id="ccb-new" title="Start a new chat for this workflow">New</button>
+              <button class="ccb-send">Send</button>
+            </div>
           </div>
           <div class="ccb-attach-menu" id="ccb-attach-menu">
             <button data-attach="inputs">Input image(s)</button>
@@ -499,24 +502,25 @@ function buildUi() {
         </div>
         <div class="ccb-view ccb-settings-view">
           <div class="ccb-settings">
-            <div class="ccb-field">
+<details class="ccb-settings-section" open><summary>Connection<span>Server, credentials and model</span></summary><div class="ccb-section-fields"><div class="ccb-field">
               <label>Provider</label>
               <select id="ccb-provider">
                 <option value="lmstudio">LM Studio</option>
+                <option value="strata">Strata</option>
                 <option value="ollama">Ollama</option>
                 <option value="openai">OpenAI-compatible</option>
                 <option value="anthropic">Anthropic</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Base URL</label>
               <input id="ccb-base-url" type="text" placeholder="http://127.0.0.1:1234/v1" />
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>API key</label>
               <input id="ccb-api-key" type="password" placeholder="not set" />
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Model</label>
               <div class="ccb-row">
                 <div class="ccb-field">
@@ -524,8 +528,17 @@ function buildUi() {
                 </div>
                 <button class="ccb-btn" id="ccb-refresh-models">Refresh</button>
               </div>
-            </div>
-            <div class="ccb-row">
+            </div></div></details>
+<details class="ccb-settings-section"><summary>Embedding connection<span>Endpoint used for knowledge, lessons and workflow experience</span></summary><div class="ccb-section-fields"><div class="ccb-field">
+              <label>Provider</label>
+              <select id="ccb-embedding-provider">
+                <option value="">Use chat connection</option><option value="lmstudio">LM Studio</option><option value="strata">Strata</option><option value="ollama">Ollama</option><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option>
+              </select>
+            </div><div class="ccb-field"><label>Base URL</label><input id="ccb-embedding-base-url" type="text" placeholder="Uses chat endpoint" /></div>
+<div class="ccb-field"><label>API key</label><input id="ccb-embedding-api-key" type="password" placeholder="not set" /></div>
+<div class="ccb-field"><label>Default embedding model</label><div class="ccb-row"><div class="ccb-field"><select id="ccb-embedding-model"></select></div><button class="ccb-btn" id="ccb-embedding-refresh">Refresh</button></div></div>
+<div class="ccb-field"><label>Unload embedding model after idle (seconds; 0 disables)</label><input id="ccb-embedding-idle-unload" type="number" min="0" step="1" /></div></div></details>
+<details class="ccb-settings-section"><summary>Model & context<span>Responses, thinking and conversation context</span></summary><div class="ccb-section-fields"><div class="ccb-field"><label>Conversation context</label><button class="ccb-new-btn" id="ccb-compact-chat" title="Compact this chat while keeping a restorable archive">Compact</button></div><div class="ccb-row">
               <div class="ccb-field">
                 <label>Temperature</label>
                 <input id="ccb-temperature" type="number" step="0.1" min="0" max="2" />
@@ -535,21 +548,48 @@ function buildUi() {
                 <input id="ccb-max-tokens" type="number" step="128" min="0" />
               </div>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Native tool calling</label>
               <select id="ccb-native-tools">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled (use inline JSON actions)</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Show model thinking (collapsed reasoning)</label>
               <select id="ccb-thinking-enabled">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
+              <label>Context window (tokens, 0 = auto-detect)</label>
+              <input id="ccb-context-window" type="number" min="0" step="1024" />
+            </div>
+              <div class="ccb-field">
+                <label>Assistant request timeout (ms, 0 = unlimited)</label>
+                <input id="ccb-assistant-fetch-timeout" type="number" min="0" step="60000" />
+              </div>
+<div class="ccb-field">
+              <label>Auto-compact when over budget</label>
+              <select id="ccb-context-auto">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+<div class="ccb-field">
+              <label>Keep last messages verbatim</label>
+              <input id="ccb-context-keep" type="number" min="4" max="60" />
+            </div>
+<div class="ccb-kb-status" id="ccb-context-status">Context: -</div>
+<div class="ccb-field">
+              <label>System prompt</label>
+              <textarea id="ccb-system-prompt" rows="5"></textarea>
+              <div class="ccb-row">
+                <button class="ccb-btn" id="ccb-system-prompt-reset">Reset to default</button>
+              </div>
+            </div></div></details>
+<details class="ccb-settings-section"><summary>Workflow behavior<span>Canvas actions and execution</span></summary><div class="ccb-section-fields"><div class="ccb-field">
               <label>Unload the LLM when I run a workflow</label>
               <div class="ccb-row">
                 <div class="ccb-field">
@@ -561,170 +601,147 @@ function buildUi() {
                 <button class="ccb-btn" id="ccb-unload-now">Unload now</button>
               </div>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Let the assistant read the ComfyUI console</label>
               <select id="ccb-console-enabled">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
-              <label>Vision</label>
-              <div class="ccb-status" id="ccb-vision">Vision support: unknown</div>
-            </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Selection awareness (tell the model what you selected)</label>
               <select id="ccb-selection-enabled">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Highlight nodes the model refers to</label>
               <select id="ccb-highlight-enabled">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Auto-arrange added nodes after building</label>
               <select id="ccb-layout-auto">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Check connections after building</label>
               <select id="ccb-validate-auto">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
+            </div></div></details>
+<details class="ccb-settings-section"><summary>Images<span>Vision support and attachments</span></summary><div class="ccb-section-fields"><div class="ccb-field">
+              <label>Vision</label>
+              <div class="ccb-status" id="ccb-vision">Vision support: unknown</div>
             </div>
-            <div class="ccb-field">
-              <label>Context window (tokens, 0 = auto-detect)</label>
-              <input id="ccb-context-window" type="number" min="0" step="1024" />
-            </div>
-            <div class="ccb-field">
-              <label>Auto-compact when over budget</label>
-              <select id="ccb-context-auto">
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
-              </select>
-            </div>
-            <div class="ccb-field">
-              <label>Keep last messages verbatim</label>
-              <input id="ccb-context-keep" type="number" min="4" max="60" />
-            </div>
-            <div class="ccb-kb-status" id="ccb-context-status">Context: -</div>
-            <div class="ccb-field">
-              <label>Use saved lessons</label>
-              <select id="ccb-memory-enabled">
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
-              </select>
-            </div>
-            <div class="ccb-field">
-              <label>Auto-detect corrections</label>
-              <select id="ccb-memory-autodetect">
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
-              </select>
-            </div>
-            <div class="ccb-field">
-              <label>Lessons injected per message</label>
-              <input id="ccb-memory-limit" type="number" min="0" placeholder="0 = all" />
-            </div>
-            <div class="ccb-field">
-              <label>Semantic lesson search (embeddings)</label>
-              <select id="ccb-memory-embed-enabled">
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
-              </select>
-            </div>
-            <div class="ccb-field">
-              <label>Lesson embedding model</label>
-              <div class="ccb-row">
-                <select id="ccb-memory-embed-model"></select>
-                <button class="ccb-btn" id="ccb-memory-embed-refresh">Refresh</button>
-              </div>
-            </div>
-            <div class="ccb-kb-status" id="ccb-memory-status">Memory: -</div>
-            <div class="ccb-field">
-              <label>Memory</label>
-              <div class="ccb-row">
-                <input id="ccb-memory-new" type="text" placeholder="Add a lesson..." />
-                <button class="ccb-btn" id="ccb-memory-add">Add</button>
-              </div>
-            </div>
-            <div class="ccb-row">
-              <button class="ccb-btn" id="ccb-memory-refresh">Refresh lessons</button>
-              <button class="ccb-btn ccb-danger" id="ccb-memory-clear">Clear all</button>
-            </div>
-            <div class="ccb-memory-list" id="ccb-memory-list"></div>
-            <div class="ccb-field">
-              <label>Record workflow experience (runs the assistant edited)</label>
-              <select id="ccb-experience-enabled">
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
-              </select>
-            </div>
-            <div class="ccb-field">
-              <label>Ask me to approve successful runs</label>
-              <select id="ccb-experience-approval">
-                <option value="true">Enabled</option>
-                <option value="false">Disabled</option>
-              </select>
-            </div>
-            <div class="ccb-field">
-              <label>Examples recalled per message</label>
-              <input id="ccb-experience-limit" type="number" min="0" placeholder="0 = all" />
-            </div>
-            <div class="ccb-field">
-              <label>Keep last N records (0 = keep all; pruning is manual)</label>
-              <div class="ccb-row">
-                <input id="ccb-experience-keep" type="number" min="0" placeholder="0 = keep all" />
-                <button class="ccb-btn" id="ccb-experience-prune">Prune</button>
-              </div>
-            </div>
-            <div class="ccb-row">
-              <button class="ccb-btn" id="ccb-experience-refresh">Refresh experience</button>
-              <button class="ccb-btn ccb-danger" id="ccb-experience-clear">Clear all</button>
-            </div>
-            <div class="ccb-kb-status" id="ccb-experience-status">Experience: -</div>
-            <div class="ccb-memory-list" id="ccb-experience-list"></div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Always include last output image</label>
               <select id="ccb-images-output">
                 <option value="false">No</option>
                 <option value="true">Yes</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Always include input images</label>
               <select id="ccb-images-inputs">
                 <option value="false">No</option>
                 <option value="true">Yes</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Auto-attach images when I mention them</label>
               <select id="ccb-images-mention">
                 <option value="true">Yes</option>
                 <option value="false">No</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Max image dimension (px)</label>
               <input id="ccb-images-max" type="number" min="256" max="4096" step="64" />
+            </div></div></details>
+<details class="ccb-settings-section"><summary>Saved lessons<span>Preferences and remembered guidance</span></summary><div class="ccb-section-fields"><div class="ccb-field">
+              <label>Use saved lessons</label>
+              <select id="ccb-memory-enabled">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
             </div>
-            <div class="ccb-field">
-              <label>System prompt</label>
-              <textarea id="ccb-system-prompt" rows="5"></textarea>
+<div class="ccb-field">
+              <label>Auto-detect corrections</label>
+              <select id="ccb-memory-autodetect">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+<div class="ccb-field">
+              <label>Lessons injected per message</label>
+              <input id="ccb-memory-limit" type="number" min="0" placeholder="0 = all" />
+            </div>
+<div class="ccb-field">
+              <label>Semantic lesson search (embeddings)</label>
+              <select id="ccb-memory-embed-enabled">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+<div class="ccb-field">
+              <label>Lesson embedding model</label>
               <div class="ccb-row">
-                <button class="ccb-btn" id="ccb-system-prompt-reset">Reset to default</button>
+                <select id="ccb-memory-embed-model"></select>
+                <button class="ccb-btn" id="ccb-memory-embed-refresh">Refresh</button>
               </div>
             </div>
-            <div class="ccb-field">
+<div class="ccb-kb-status" id="ccb-memory-status">Memory: -</div>
+<div class="ccb-field">
+              <label>Memory</label>
+              <div class="ccb-row">
+                <input id="ccb-memory-new" type="text" placeholder="Add a lesson..." />
+                <button class="ccb-btn" id="ccb-memory-add">Add</button>
+              </div>
+            </div>
+<div class="ccb-row">
+              <button class="ccb-btn" id="ccb-memory-refresh">Refresh lessons</button>
+              <button class="ccb-btn ccb-danger" id="ccb-memory-clear">Clear all</button>
+            </div>
+<div class="ccb-memory-list" id="ccb-memory-list"></div></div></details>
+<details class="ccb-settings-section"><summary>Workflow experience<span>Saved results and approval</span></summary><div class="ccb-section-fields"><div class="ccb-field">
+              <label>Record workflow experience (runs the assistant edited)</label>
+              <select id="ccb-experience-enabled">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+<div class="ccb-field">
+              <label>Ask me to approve successful runs</label>
+              <select id="ccb-experience-approval">
+                <option value="true">Enabled</option>
+                <option value="false">Disabled</option>
+              </select>
+            </div>
+<div class="ccb-field">
+              <label>Examples recalled per message</label>
+              <input id="ccb-experience-limit" type="number" min="0" placeholder="0 = all" />
+            </div>
+<div class="ccb-field">
+              <label>Keep last N records (0 = keep all; pruning is manual)</label>
+              <div class="ccb-row">
+                <input id="ccb-experience-keep" type="number" min="0" placeholder="0 = keep all" />
+                <button class="ccb-btn" id="ccb-experience-prune">Prune</button>
+              </div>
+            </div>
+<div class="ccb-row">
+              <button class="ccb-btn" id="ccb-experience-refresh">Refresh experience</button>
+              <button class="ccb-btn ccb-danger" id="ccb-experience-clear">Clear all</button>
+            </div>
+<div class="ccb-kb-status" id="ccb-experience-status">Experience: -</div>
+<div class="ccb-memory-list" id="ccb-experience-list"></div></div></details>
+<details class="ccb-settings-section"><summary>Web search<span>Search service and results</span></summary><div class="ccb-section-fields"><div class="ccb-field">
               <label>Web search provider</label>
               <select id="ccb-websearch-provider">
                 <option value="tavily">Tavily</option>
@@ -732,62 +749,62 @@ function buildUi() {
                 <option value="serpapi">SerpAPI</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Web search API key</label>
               <input id="ccb-websearch-key" type="password" placeholder="not set" />
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Max search results</label>
               <input id="ccb-websearch-count" type="number" min="1" max="20" />
-            </div>
-            <div class="ccb-field">
+            </div></div></details>
+<details class="ccb-settings-section"><summary>Knowledge base<span>Indexing, documentation and coverage</span></summary><div class="ccb-section-fields"><div class="ccb-field">
               <label>Knowledge base</label>
               <select id="ccb-kb-enabled">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Official docs auto-update</label>
               <select id="ccb-kb-auto-official">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Official docs refresh (days)</label>
               <input id="ccb-kb-refresh-days" type="number" min="1" max="365" />
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Index example workflows</label>
               <select id="ccb-kb-examples">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Index custom node registry</label>
               <select id="ccb-kb-registry">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Index extended docs (wiki, README)</label>
               <select id="ccb-kb-extended">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
+<div class="ccb-field">
               <label>Embedding search</label>
               <select id="ccb-kb-embed-enabled">
                 <option value="true">Enabled</option>
                 <option value="false">Disabled</option>
               </select>
             </div>
-            <div class="ccb-field">
-              <label>Embedding model (blank = auto)</label>
+<div class="ccb-field">
+              <label>Embedding model (blank = shared model)</label>
               <div class="ccb-row">
                 <div class="ccb-field">
                   <select id="ccb-kb-embed-model"></select>
@@ -795,32 +812,34 @@ function buildUi() {
                 <button class="ccb-btn" id="ccb-kb-embed-refresh">Refresh</button>
               </div>
             </div>
-            <div class="ccb-row">
+<div class="ccb-row">
               <button class="ccb-btn" id="ccb-kb-rebuild">Rebuild index</button>
               <button class="ccb-btn" id="ccb-kb-sync">Sync official docs</button>
               <button class="ccb-btn" id="ccb-kb-compact">Compact</button>
             </div>
-            <div class="ccb-kb-status" id="ccb-kb-status">Knowledge base: loading...</div>
-            <div class="ccb-field">
+<div class="ccb-kb-status" id="ccb-kb-status">Knowledge base: loading...</div>
+<details id="ccb-kb-coverage"><summary>Node coverage details</summary><div style="white-space: pre-wrap; overflow-wrap: anywhere"></div></details></div></details>
+<details class="ccb-settings-section"><summary>Diagnostics<span>Debug reports and workflow tests</span></summary><div class="ccb-section-fields"><div class="ccb-field">
               <label>Debug</label>
               <label class="ccb-checkbox">
                 <input type="checkbox" id="ccb-debug-enabled" />
                 Enable debug logging (no personal data is recorded)
               </label>
             </div>
-            <div class="ccb-row">
+<div class="ccb-row">
               <button class="ccb-btn" id="ccb-debug-copy">Copy report</button>
               <button class="ccb-btn" id="ccb-debug-download">Download report</button>
               <button class="ccb-btn" id="ccb-debug-clear">Clear log</button>
             </div>
-            <div class="ccb-kb-status" id="ccb-debug-status">Debug: off</div>
-            <div class="ccb-row">
+<div class="ccb-kb-status" id="ccb-debug-status">Debug: off</div>
+<button class="ccb-btn" id="ccb-workflow-tests">Test workflow tasks</button></div></details>
+</div>
+<div class="ccb-settings-footer"><div class="ccb-row">
               <button class="ccb-btn ccb-primary" id="ccb-save">Save</button>
               <button class="ccb-btn" id="ccb-test">Test connection</button>
-              <button class="ccb-btn" id="ccb-workflow-tests">Test workflow tasks</button>
+
             </div>
-            <div class="ccb-status" id="ccb-status"></div>
-          </div>
+<div class="ccb-status" id="ccb-status"></div></div>
         </div>
       </div>
     </div>
@@ -837,6 +856,8 @@ function buildUi() {
     send: root.querySelector(".ccb-send"),
     attachments: root.querySelector("#ccb-attachments"),
     attachMenu: root.querySelector("#ccb-attach-menu"),
+    thinkingLevel: root.querySelector("#ccb-thinking-level"),
+    compactChat: root.querySelector("#ccb-compact-chat"),
     status: root.querySelector("#ccb-status"),
   };
   wireUi();
@@ -866,6 +887,7 @@ function wireUi() {
     else submitInput();
   });
   root.querySelector("#ccb-new").addEventListener("click", () => startNewChat());
+  root.querySelector("#ccb-compact-chat").addEventListener("click", () => compactChat());
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
@@ -880,9 +902,13 @@ function wireUi() {
 
   root.querySelector("#ccb-provider").addEventListener("change", () => {
     applyProviderDefaultUrl();
+    populateThinkingLevelMenu();
     refreshModels();
   });
   root.querySelector("#ccb-base-url").addEventListener("change", () => refreshModels());
+  root.querySelector("#ccb-embedding-provider").addEventListener("change", () => { applyEmbeddingDefaultUrl(); refreshEmbedModels("", "#ccb-embedding-model"); });
+  root.querySelector("#ccb-embedding-base-url").addEventListener("change", () => refreshEmbedModels("", "#ccb-embedding-model"));
+  root.querySelector("#ccb-embedding-refresh").addEventListener("click", () => refreshEmbedModels("", "#ccb-embedding-model"));
   root.querySelector("#ccb-refresh-models").addEventListener("click", () => refreshModels());
   root.querySelector("#ccb-save").addEventListener("click", () => saveSettings());
   root.querySelector("#ccb-system-prompt-reset").addEventListener("click", () => {
@@ -906,11 +932,17 @@ function wireUi() {
       appendNotice(error.message);
     }
   });
-  root.querySelector("#ccb-memory-refresh").addEventListener("click", () => loadLessons());
+  root.querySelector("#ccb-memory-refresh").addEventListener("click", async () => {
+    await reindexLessons();
+    await loadLessons();
+  });
   root.querySelector("#ccb-memory-embed-refresh").addEventListener("click", () => {
     refreshEmbedModels("", "#ccb-memory-embed-model");
   });
-  root.querySelector("#ccb-experience-refresh").addEventListener("click", () => loadExperiences());
+  root.querySelector("#ccb-experience-refresh").addEventListener("click", async () => {
+    await reindexExperiences();
+    await loadExperiences();
+  });
   root.querySelector("#ccb-experience-clear").addEventListener("click", () =>
     updateExperience({ action: "clear" }).catch((error) => appendNotice(error.message)),
   );
@@ -927,9 +959,11 @@ function wireUi() {
   root.querySelector("#ccb-debug-clear").addEventListener("click", () => clearDebugLog());
   root.querySelector("#ccb-unload-now").addEventListener("click", () => unloadLlm(false));
   root.querySelector("#ccb-model").addEventListener("change", () => {
+    populateThinkingLevelMenu();
     detectVision();
     detectContextWindow();
   });
+  root.querySelector("#ccb-thinking-level").addEventListener("change", () => saveThinkingLevel());
 
   const attachMenu = state.dom.attachMenu;
   root.querySelector("#ccb-attach").addEventListener("click", (event) => {
@@ -940,14 +974,18 @@ function wireUi() {
   attachMenu.addEventListener("click", (event) => event.stopPropagation());
   root.querySelector('#ccb-attach-menu [data-attach="inputs"]').addEventListener("click", attachInputImages);
   root.querySelector('#ccb-attach-menu [data-attach="output"]').addEventListener("click", attachLastOutput);
+  let fileAttachmentTarget;
   root.querySelector('#ccb-attach-menu [data-attach="file"]').addEventListener("click", () => {
+    fileAttachmentTarget = { owner: state.sessionKey, attachments: state.attachments };
     attachMenu.classList.remove("ccb-open");
     root.querySelector("#ccb-file").click();
   });
   root.querySelector("#ccb-file").addEventListener("change", async (event) => {
+    const { owner, attachments } = fileAttachmentTarget || { owner: state.sessionKey, attachments: state.attachments };
+    fileAttachmentTarget = null;
     for (const file of Array.from(event.target.files || [])) {
       const objectUrl = URL.createObjectURL(file);
-      await addAttachment({ name: file.name, url: objectUrl, source: "file" });
+      await addAttachment({ name: file.name, url: objectUrl, source: "file" }, owner, attachments);
       URL.revokeObjectURL(objectUrl);
     }
     event.target.value = "";
@@ -965,7 +1003,19 @@ function selectTab(name) {
   });
   state.dom.root.querySelector(".ccb-chat-view").classList.toggle("ccb-active", name === "chat");
   state.dom.root.querySelector(".ccb-settings-view").classList.toggle("ccb-active", name === "settings");
-  if (name === "settings") refreshModels();
+  if (name === "settings") refreshOptionalSettings();
+}
+
+function refreshOptionalSettings() {
+  if (!state.configLoaded) {
+    state.settingsDiscoveryPending = true;
+    return;
+  }
+  void refreshModels();
+  void refreshEmbedModels("", "#ccb-embedding-model");
+  void refreshEmbedModels("", "#ccb-memory-embed-model");
+  void refreshEmbedModels("", "#ccb-kb-embed-model");
+  void refreshKbStatus();
 }
 
 function togglePanel(open) {
@@ -982,7 +1032,7 @@ function togglePanel(open) {
     }
     scrollMessages();
     state.dom.input.focus();
-    refreshKbStatus();
+    startKbOnAssistantOpen();
   } else {
     clearTimeout(state.kbTimer);
   }
@@ -1087,7 +1137,8 @@ function restorePosition(element, key, fallback) {
 
 async function getNodeDefs() {
   if (!state.nodeDefsPromise) {
-    state.nodeDefsPromise = api.getNodeDefs().catch((error) => {
+    state.nodeDefsPromise = assistantFetchApi("/object_info", { cache: "no-store" })
+      .then((response) => response.json()).catch((error) => {
       state.nodeDefsPromise = null;
       throw error;
     });
@@ -1241,6 +1292,9 @@ function addNode(type, x, y, title, near, wrap = true) {
   else app.graph.add(node);
   if (title) node.title = title;
   state.runMutatedGraph = true;
+  const nodeOwner = state.runWorkflowKey || state.sessionKey;
+  if (state.runNodeOwner !== nodeOwner) state.runAddedNodeIds = [];
+  state.runNodeOwner = nodeOwner;
   state.runAddedNodeIds.push(node.id);
   return { ok: true, id: node.id, type: node.type, title: node.title, pos: [node.pos[0], node.pos[1]] };
 }
@@ -1877,7 +1931,7 @@ function collectInputImages() {
 async function lastOutputImage() {
   if (state.lastOutputs.length) return state.lastOutputs[state.lastOutputs.length - 1];
   try {
-    const response = await api.fetchApi("/history");
+    const response = await assistantFetchApi("/history");
     const history = await response.json();
     const entries = Object.values(history || {});
     for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -1941,7 +1995,7 @@ function renderAttachments() {
   }
 }
 
-async function addAttachment(entry) {
+async function addAttachment(entry, owner = state.sessionKey, attachments = state.attachments) {
   if (state.visionSupported === false) {
     appendNotice("Not attached: the selected model is not vision-capable.");
     return;
@@ -1949,19 +2003,21 @@ async function addAttachment(entry) {
   try {
     const maxDimension = state.config?.images?.max_dimension || 1024;
     const dataUrl = entry.dataUrl || (await urlToDataUrl(entry.url, maxDimension));
-    state.attachments.push({
+    attachments.push({
       id: `${Date.now()}_${Math.random().toString(36).slice(2)}`,
       name: entry.name,
       dataUrl,
       source: entry.source,
     });
-    renderAttachments();
+    if (state.sessionKey === owner && state.attachments === attachments) renderAttachments();
   } catch (error) {
-    appendNotice(`Attach failed: ${error.message}`);
+    if (state.sessionKey === owner) appendNotice(`Attach failed: ${error.message}`);
   }
 }
 
 async function attachInputImages() {
+  if (!state.sessionKey || resolveWorkflowKey() !== state.sessionKey) return;
+  const owner = state.sessionKey, attachments = state.attachments;
   state.dom.attachMenu.classList.remove("ccb-open");
   const inputs = collectInputImages();
   if (!inputs.length) {
@@ -1969,18 +2025,20 @@ async function attachInputImages() {
     return;
   }
   for (const entry of inputs) {
-    await addAttachment({ name: entry.name, url: entry.url, source: "input" });
+    await addAttachment({ name: entry.name, url: entry.url, source: "input" }, owner, attachments);
   }
 }
 
 async function attachLastOutput() {
+  if (!state.sessionKey || resolveWorkflowKey() !== state.sessionKey) return;
+  const owner = state.sessionKey, attachments = state.attachments;
   state.dom.attachMenu.classList.remove("ccb-open");
   const last = await lastOutputImage();
   if (!last) {
-    appendNotice("No generated image found yet. Run the workflow first.");
+    if (state.sessionKey === owner) appendNotice("No generated image found yet. Run the workflow first.");
     return;
   }
-  await addAttachment({ name: `output: ${last.filename}`, url: last.url, source: "output" });
+  await addAttachment({ name: `output: ${last.filename}`, url: last.url, source: "output" }, owner, attachments);
 }
 
 async function gatherAutoImages() {
@@ -2032,7 +2090,7 @@ async function gatherMentionedImages(text) {
 }
 
 async function webSearch(query, count) {
-  const response = await api.fetchApi("/chatbot/websearch", {
+  const response = await assistantFetchApi("/chatbot/websearch", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query, count }),
@@ -2043,7 +2101,7 @@ async function webSearch(query, count) {
 }
 
 async function searchDocs(query, limit, source) {
-  const response = await api.fetchApi("/chatbot/docs/search", {
+  const response = await assistantFetchApi("/chatbot/docs/search", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query, limit, source }),
@@ -2055,7 +2113,7 @@ async function searchDocs(query, limit, source) {
 
 async function getNodeDocs(type, limit) {
   const verified = state.verifiedNodeTypes ??= new Set();
-  const response = await api.fetchApi("/chatbot/docs/node", {
+  const response = await assistantFetchApi("/chatbot/docs/node", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ type, limit }),
@@ -2148,6 +2206,10 @@ async function executeTool(name, args) {
 
 async function submitInput() {
   const text = state.dom.input.value.trim();
+  if (state.compactionInProgress) {
+    appendNotice("Chat compaction is still running. Your message is still in the composer.");
+    return;
+  }
   if (!text || state.busy || state.requestActive || state.historyLoading) return;
   if (state.llmUnloading) { appendNotice("Wait for model unloading to finish, then send again."); return; }
   const command = text.toLowerCase();
@@ -2186,9 +2248,11 @@ async function submitInput() {
   const activeKey = resolveWorkflowKey();
   if (!activeKey) { appendNotice("Wait for the workflow tab to finish loading before sending."); return; }
   if (activeKey && activeKey !== state.sessionKey) { await switchSession(activeKey); return; }
+  if (state.historyLoadFailed) { await loadHistory(); return; }
   state.requestActive = true;
   state.cancelled = false;
   state.runWorkflowKey = activeKey;
+  state.runThinking = { ...(state.config?.thinking || {}) };
   state.runSelectionContext = selectionContext();
   state.runGraphSnapshot = graphContentStamp();
   try {
@@ -2237,6 +2301,7 @@ async function submitInput() {
     await saveHistory();
     state.requestActive = false;
     state.runWorkflowKey = null;
+    state.runThinking = null;
     state.runGraphSnapshot = null;
     await flushPendingSessionSwitch();
   }
@@ -2516,7 +2581,7 @@ async function streamAssistantReply() {
         reasoningView.summary.textContent = `Thinking\u2026 (${reasoning.length.toLocaleString()} chars)`;
         scrollMessages();
       }
-    }, state.abortController.signal);
+    }, state.abortController.signal, state.runThinking);
     if (!text && !result.toolCalls.length) bubble.remove();
     if (reasoningView && !reasoning) reasoningView.box.remove();
     return { text: result.text, toolCalls: result.toolCalls, reasoning };
@@ -2714,7 +2779,7 @@ function updateDebugStatus() {
 }
 
 async function fetchDebugReport() {
-  const response = await api.fetchApi("/chatbot/debug/report", {
+  const response = await assistantFetchApi("/chatbot/debug/report", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client: clientReport() }),
@@ -2764,7 +2829,7 @@ async function downloadDebugReport() {
 async function clearDebugLog() {
   state.debugBuffer = [];
   try {
-    await api.fetchApi("/chatbot/debug/clear", {
+    await assistantFetchApi("/chatbot/debug/clear", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -2800,6 +2865,23 @@ function limitSetting(name, fallback = 0) {
   return Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
+// ComfyUI's fetchApi defaults to a 60-second header timeout. Pass the
+// documented timeoutMs override on every assistant request; AbortSignal stays
+// in the original options so the user's Stop action still cancels streaming.
+function assistantFetchApi(path, options = {}) {
+  const configuredTimeout = limitSetting("assistant_fetch_timeout_ms", 0);
+  return api.fetchApi(path, {
+    ...options,
+    timeoutMs: configuredTimeout > 0 ? configuredTimeout : null,
+  }).catch((error) => {
+    if (configuredTimeout > 0 && error?.name === "TimeoutError") {
+      const route = String(path).split("?", 1)[0];
+      throw new Error(`${error.message} on ${route} after ${configuredTimeout} ms`, { cause: error });
+    }
+    throw error;
+  });
+}
+
 function appendChatCard(text, buttons) {
   const card = el("div", { class: "ccb-card" });
   card.appendChild(el("div", { class: "ccb-card-text", text }));
@@ -2833,13 +2915,14 @@ function confirmDialog(title, detail, confirmLabel = "Confirm") {
 }
 
 async function startNewChat() {
-  if (state.busy || state.requestActive || state.workflowTestRunning || state.historyLoading) {
+  if (state.busy || state.requestActive || state.workflowTestRunning || state.historyLoading || state.compactionInProgress) {
     appendNotice("Wait for the current request to finish before starting a new chat.");
     return;
   }
   const activeKey = resolveWorkflowKey();
   if (!activeKey) return;
   if (activeKey !== state.sessionKey) { await switchSession(activeKey); return; }
+  if (state.historyLoadFailed) { await loadHistory(); return; }
   state.historyRevision = (state.historyRevision || 0) + 1;
   state.messages = [];
   state.dom.messages.innerHTML = "";
@@ -2849,10 +2932,15 @@ async function startNewChat() {
 }
 
 async function loadConfig() {
-  const response = await api.fetchApi("/chatbot/config");
+  const response = await assistantFetchApi("/chatbot/config");
   const payload = await response.json();
   state.config = payload.config || {};
+  state.configLoaded = true;
   populateSettings();
+  if (state.settingsDiscoveryPending) {
+    state.settingsDiscoveryPending = false;
+    refreshOptionalSettings();
+  }
 }
 
 function populateSettings() {
@@ -2865,11 +2953,18 @@ function populateSettings() {
   setValue("#ccb-provider", config.provider || "lmstudio");
   setValue("#ccb-base-url", config.base_url || "");
   setPlaceholder("#ccb-api-key", config.api_key_configured ? "\u2022\u2022\u2022 configured" : "not set");
+  const embedding = config.embedding || {};
+  setValue("#ccb-embedding-provider", embedding.provider || "");
+  setValue("#ccb-embedding-base-url", embedding.base_url || "");
+  setPlaceholder("#ccb-embedding-api-key", embedding.api_key_configured ? "\u2022\u2022\u2022 configured" : "not set");
+  setLocalModelOption("#ccb-embedding-model", embedding.model || "");
+  setValue("#ccb-embedding-idle-unload", config.limits?.embedding_idle_unload_seconds ?? 60);
   setModelOptions(state.availableModels, config.model || "");
   setValue("#ccb-temperature", config.temperature ?? 0.7);
   setValue("#ccb-max-tokens", config.max_tokens ?? 0);
   setValue("#ccb-native-tools", String(config.use_native_tools !== false));
   setValue("#ccb-thinking-enabled", String(config.thinking?.enabled !== false));
+  populateThinkingLevelMenu();
   setValue("#ccb-unload-on-execute", String(config.unload?.on_execute !== false));
   setValue("#ccb-console-enabled", String(config.console?.enabled !== false));
   setValue("#ccb-images-output", String(images.always_output === true));
@@ -2881,13 +2976,14 @@ function populateSettings() {
   setValue("#ccb-layout-auto", String(config.layout?.auto_after_build !== false));
   setValue("#ccb-validate-auto", String(config.validate?.auto_fix !== false));
   setValue("#ccb-context-window", config.context?.window ?? 0);
+  setValue("#ccb-assistant-fetch-timeout", config.limits?.assistant_fetch_timeout_ms ?? 0);
   setValue("#ccb-context-auto", String(config.context?.auto_compact !== false));
   setValue("#ccb-context-keep", config.context?.keep_last ?? 12);
   setValue("#ccb-memory-enabled", String(config.memory?.enabled !== false));
   setValue("#ccb-memory-autodetect", String(config.memory?.auto_detect !== false));
   setValue("#ccb-memory-limit", config.memory?.inject_limit ?? 0);
   setValue("#ccb-memory-embed-enabled", String(config.memory?.embed?.enabled !== false));
-  refreshEmbedModels(config.memory?.embed?.model || "", "#ccb-memory-embed-model");
+  setLocalModelOption("#ccb-memory-embed-model", config.memory?.embed?.model || "");
   setValue("#ccb-experience-enabled", String(config.experience?.enabled !== false));
   setValue("#ccb-experience-approval", String(config.experience?.ask_approval !== false));
   setValue("#ccb-experience-limit", config.experience?.recall_limit ?? 0);
@@ -2902,12 +2998,23 @@ function populateSettings() {
   setValue("#ccb-kb-registry", String(kb.registry !== false));
   setValue("#ccb-kb-extended", String(kb.extended_official !== false));
   setValue("#ccb-kb-embed-enabled", String(kb.embed?.enabled !== false));
-  refreshEmbedModels(kb.embed?.model || "");
+  setLocalModelOption("#ccb-kb-embed-model", kb.embed?.model || "");
   setChecked("#ccb-debug-enabled", config.debug?.enabled === true);
   updateDebugStatus();
   updateVisionBadge();
   updateContextStatus();
-  refreshKbStatus();
+}
+
+function setLocalModelOption(selector, selected) {
+  const select = state.dom.root?.querySelector(selector);
+  if (!select) return;
+  const current = selected || select.value || "";
+  select.innerHTML = "";
+  const option = document.createElement("option");
+  option.value = current;
+  option.textContent = current || "Auto (click Refresh)";
+  select.appendChild(option);
+  select.value = current;
 }
 
 function setValue(selector, value) {
@@ -2932,6 +3039,7 @@ function isChecked(selector) {
 function applyProviderDefaultUrl() {
   const provider = state.dom.root.querySelector("#ccb-provider").value;
   const defaults = {
+    strata: "http://p40:8080/v1",
     lmstudio: "http://127.0.0.1:1234/v1",
     ollama: "http://127.0.0.1:11434/v1",
     openai: "https://api.openai.com/v1",
@@ -2943,12 +3051,20 @@ function applyProviderDefaultUrl() {
   }
 }
 
+function applyEmbeddingDefaultUrl() {
+  const provider = state.dom.root.querySelector("#ccb-embedding-provider").value;
+  const defaults = { strata: "http://p40:8080/v1", lmstudio: "http://127.0.0.1:1234/v1", ollama: "http://127.0.0.1:11434/v1", openai: "https://api.openai.com/v1", anthropic: "https://api.anthropic.com" };
+  const field = state.dom.root.querySelector("#ccb-embedding-base-url");
+  if (defaults[provider] && (!field.value || Object.values(defaults).includes(field.value))) field.value = defaults[provider];
+}
+
 function collectSettings() {
   const get = (selector) => state.dom.root.querySelector(selector)?.value ?? "";
   const payload = {
     provider: get("#ccb-provider"),
     base_url: get("#ccb-base-url"),
     model: get("#ccb-model"),
+    embedding: { provider: get("#ccb-embedding-provider"), base_url: get("#ccb-embedding-base-url"), model: get("#ccb-embedding-model") },
     temperature: Number(get("#ccb-temperature")) || 0,
     max_tokens: Number(get("#ccb-max-tokens")) || 0,
     use_native_tools: get("#ccb-native-tools") === "true",
@@ -3020,18 +3136,70 @@ function collectSettings() {
     debug: {
       enabled: isChecked("#ccb-debug-enabled"),
     },
+    limits: {
+      embedding_idle_unload_seconds: Math.max(0, Number(get("#ccb-embedding-idle-unload")) || 0),
+      assistant_fetch_timeout_ms: Math.max(0, Number(get("#ccb-assistant-fetch-timeout")) || 0),
+    },
   };
   const apiKey = get("#ccb-api-key");
   if (apiKey) payload.api_key = apiKey;
+  const embeddingApiKey = get("#ccb-embedding-api-key");
+  if (embeddingApiKey) payload.embedding.api_key = embeddingApiKey;
   const websearchKey = get("#ccb-websearch-key");
   if (websearchKey) payload.websearch.api_key = websearchKey;
   return payload;
 }
 
+function supportedThinkingLevels(provider, baseUrl, model) {
+  const levels = ["auto"];
+  if (provider !== "openai" || !["https://api.openai.com/v1", "https://api.openai.com"].includes(String(baseUrl || "").replace(/\/$/, "").toLowerCase())) return levels;
+  const name = String(model || "").toLowerCase();
+  if (name === "gpt-5.1" || /^gpt-5\.1-\d{4}-\d{2}-\d{2}$/.test(name)) return [...levels, "off", "low", "medium", "high"];
+  return levels;
+}
+
+function populateThinkingLevelMenu() {
+  const select = state.dom.root?.querySelector("#ccb-thinking-level");
+  if (!select) return;
+  const provider = state.config?.provider || "";
+  const baseUrl = state.config?.base_url || "";
+  const model = state.config?.model || "";
+  const levels = supportedThinkingLevels(provider, baseUrl, model);
+  const selected = state.config?.thinking?.level || "auto";
+  select.innerHTML = "";
+  const labels = { auto: "Think: Auto", off: "Think: Off", low: "Think: Low", medium: "Think: Med", high: "Think: High" };
+  for (const level of levels) select.appendChild(el("option", { value: level, text: labels[level] }));
+  select.value = levels.includes(selected) ? selected : "auto";
+  select.title = provider === "strata"
+    ? "This Strata model does not advertise effort controls; Auto uses the server default."
+    : levels.length === 1
+      ? "This provider and model do not advertise effort controls; Auto uses the provider default."
+      : "Thinking level for the next request";
+}
+
+function saveThinkingLevel() {
+  const level = state.dom.thinkingLevel.value;
+  state.config ||= {};
+  state.config.thinking = { ...(state.config.thinking || {}), level };
+  state.thinkingSavePromise = (state.thinkingSavePromise || Promise.resolve()).then(async () => {
+    const response = await assistantFetchApi("/chatbot/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thinking: { level } }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    const latest = state.dom.thinkingLevel.value;
+    state.config.thinking = { ...(state.config.thinking || {}), level: latest };
+    setStatus("Thinking level saved.");
+  }).catch((error) => setStatus(`Thinking level save failed: ${error.message}`));
+  return state.thinkingSavePromise;
+}
+
 async function saveSettings() {
   setStatus("Saving...");
   try {
-    const response = await api.fetchApi("/chatbot/config", {
+    const response = await assistantFetchApi("/chatbot/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(collectSettings()),
@@ -3070,14 +3238,32 @@ function setModelOptions(models, selected) {
 async function refreshEmbedModels(selected = "", selector = "#ccb-kb-embed-model") {
   const select = state.dom.root?.querySelector(selector);
   if (!select) return;
+  state.embeddingModelRevision ||= new Map();
+  const revision = (state.embeddingModelRevision.get(selector) || 0) + 1;
+  state.embeddingModelRevision.set(selector, revision);
   try {
-    const response = await api.fetchApi("/chatbot/embed_models", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(collectSettings()),
+    const settings = collectSettings();
+    const embedding = settings.embedding || {};
+    const requestKey = JSON.stringify({
+      provider: embedding.provider || settings.provider || "",
+      base_url: embedding.provider ? embedding.base_url : settings.base_url,
+      api_key: embedding.provider ? embedding.api_key : settings.api_key,
     });
-    const payload = await response.json();
-    const models = Array.isArray(payload.models) ? payload.models : [];
+    state.embeddingModelRequests ||= new Map();
+    let modelsRequest = state.embeddingModelRequests.get(requestKey);
+    if (!modelsRequest) {
+      modelsRequest = assistantFetchApi("/chatbot/embed_models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings),
+      }).then(response => response.json()).then(payload => Array.isArray(payload.models) ? payload.models : []);
+      state.embeddingModelRequests.set(requestKey, modelsRequest);
+      void modelsRequest.finally(() => {
+        if (state.embeddingModelRequests.get(requestKey) === modelsRequest) state.embeddingModelRequests.delete(requestKey);
+      }).catch(() => {});
+    }
+    const models = await modelsRequest;
+    if (state.embeddingModelRevision.get(selector) !== revision) return;
     const current = selected || select.value || "";
     select.innerHTML = "";
     const auto = document.createElement("option");
@@ -3107,7 +3293,7 @@ async function refreshModels(isTest = false) {
   const current = select?.value || state.config?.model || "";
   setStatus(isTest ? "Testing connection..." : "Loading models...");
   try {
-    const response = await api.fetchApi("/chatbot/models", {
+    const response = await assistantFetchApi("/chatbot/models", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(collectSettings()),
@@ -3179,7 +3365,9 @@ async function loadGraphSnapshot(snapshot) {
   if (!snapshot) return;
   if (state.runWorkflowKey) assertRunWorkflow();
   if (typeof app.loadGraphData === "function") {
-    await app.loadGraphData(snapshot);
+    const workflow = (app.extensionManager?.workflow ?? app.workflowManager)?.activeWorkflow;
+    if (!workflow) throw new Error("Wait for the workflow tab to finish loading.");
+    await app.loadGraphData(snapshot, true, true, workflow);
     return;
   }
   app.graph.clear();
@@ -3191,11 +3379,11 @@ async function clearGraph() {
   await loadGraphSnapshot(EMPTY_GRAPH);
 }
 
-async function streamChat(messages, tools, onEvent, signal) {
-  const response = await api.fetchApi("/chatbot/chat", {
+async function streamChat(messages, tools, onEvent, signal, thinking = state.runThinking || state.config?.thinking || {}) {
+  const response = await assistantFetchApi("/chatbot/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, tools }),
+    body: JSON.stringify({ messages, tools, thinking }),
     signal,
   });
   if (!response.ok) {
@@ -3290,7 +3478,7 @@ async function runTaskAgent(task, status) {
         liveText += event.text;
         setStatus(`${task.label} \u2014 ${truncate(liveText, 160)}`);
       }
-    }, state.testAbortController?.signal);
+    }, state.testAbortController?.signal, state.runThinking);
     if (state.workflowTestCancel) break;
     if (text) lastText = text;
     if (!toolCalls.length) {
@@ -3361,7 +3549,7 @@ async function beginWorkflowTests() {
   state.pendingWorkflowTests = true;
   let note = "";
   try {
-    const response = await api.fetchApi("/chatbot/test_workflow");
+    const response = await assistantFetchApi("/chatbot/test_workflow");
     const payload = await response.json();
     if (!payload.image_installed) {
       note =
@@ -3378,9 +3566,13 @@ async function beginWorkflowTests() {
 
 async function startWorkflowTestSuite() {
   if (state.workflowTestRunning || state.busy || state.requestActive || state.llmUnloading) return;
+  const owner = resolveWorkflowKey();
+  if (!owner || state.historyLoading || state.historyLoadFailed) return;
+  if (owner !== state.sessionKey) { await switchSession(owner); return; }
   state.pendingWorkflowTests = false;
   state.workflowTestRunning = true;
-  state.runWorkflowKey = resolveWorkflowKey();
+  state.runWorkflowKey = owner;
+  state.runThinking = { ...(state.config?.thinking || {}) };
   state.workflowTestCancel = false;
   state.testAbortController = new AbortController();
   setTestBusy(true);
@@ -3471,6 +3663,7 @@ async function startWorkflowTestSuite() {
     }
     state.workflowTestRunning = false;
     state.runWorkflowKey = null;
+    state.runThinking = null;
     await flushPendingSessionSwitch();
     state.workflowTestCancel = false;
     state.testAbortController = null;
@@ -3495,7 +3688,7 @@ async function detectVision() {
     return;
   }
   try {
-    const response = await api.fetchApi("/chatbot/vision", {
+    const response = await assistantFetchApi("/chatbot/vision", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...collectSettings(), model }),
@@ -3513,7 +3706,7 @@ async function refreshKbStatus() {
   const element = state.dom.root.querySelector("#ccb-kb-status");
   if (!element) return;
   try {
-    const response = await api.fetchApi("/chatbot/kb/status");
+    const response = await assistantFetchApi("/chatbot/kb/status");
     const payload = await response.json();
     const kb = payload.status || {};
     const bar = state.dom.root.querySelector("#ccb-kb-bar");
@@ -3538,24 +3731,53 @@ async function refreshKbStatus() {
     const coverage = kb.coverage;
     if (coverage?.registry_available) {
       parts.push(`local nodes indexed: ${coverage.indexed}/${coverage.registered}`);
-      if (coverage.missing?.length) parts.push(`missing: ${coverage.missing.join(", ")}`);
-      if (coverage.failures?.length) parts.push(`node errors: ${coverage.failures.map(item => `${item.name}: ${item.error}`).join("; ")}`);
+      if (coverage.missing?.length) parts.push(`missing: ${coverage.missing.length}`);
+      if (coverage.failures?.length) parts.push(`node errors: ${coverage.failures.length}`);
       if (coverage.unknown_purpose?.length) parts.push(`${coverage.unknown_purpose.length} nodes have no documented purpose`);
-      if (coverage.unavailable?.length) parts.push(`unavailable since last build: ${coverage.unavailable.join(", ")}`);
+      if (coverage.unavailable?.length) parts.push(`unavailable since last build: ${coverage.unavailable.length}`);
     } else if (coverage) {
       parts.push(`local node inventory unavailable: ${coverage.error || "unknown"}`);
+    }
+    const details = state.dom.root.querySelector("#ccb-kb-coverage");
+    if (details) {
+      const renderCoverage = () => {
+        if (!details.open) return;
+        const lines = [];
+        for (const [label, values] of [["Missing", coverage?.missing], ["Unavailable", coverage?.unavailable],
+          ["Unknown purpose", coverage?.unknown_purpose],
+          ["Schema errors", coverage?.failures?.map(item => `${item.name}: ${item.error}`)]]) {
+          if (values?.length) lines.push(`${label} (${values.length}):\n${values.join("\n")}`);
+        }
+        details.querySelector("div").textContent = lines.join("\n\n") || "No coverage issues reported.";
+      };
+      details.ontoggle = renderCoverage;
+      renderCoverage();
     }
     parts.push(
       `nodes ${kb.node_chunks ?? 0} \u00b7 packs ${kb.pack_chunks ?? 0} \u00b7 examples ${kb.example_chunks ?? 0} \u00b7 registry ${kb.registry_chunks ?? 0} \u00b7 models ${kb.model_chunks ?? 0}`,
     );
     parts.push(`embedded ${kb.embedded ?? 0}${kb.embed_model ? ` (${kb.embed_model})` : ""}`);
+    if (kb.embed_reason) parts.push(kb.embed_reason);
     if (kb.embed_window_tokens) {
       parts.push(`embed window ${kb.embed_window_tokens} tokens${kb.embed_window_source ? ` (${kb.embed_window_source})` : ""}`);
+    }
+    if (kb.embed_window_observed_source === "fallback") {
+      parts.push(`fallback window ${kb.embed_window_observed_tokens} tokens observed; using the last verified window`);
     }
     parts.push(`official: ${kb.official_fetched_iso || "never"}`);
     if (kb.embed_error) parts.push(`embed error: ${kb.embed_error}`);
     if (kb.error) parts.push(`error: ${kb.error}`);
     element.textContent = `Knowledge base: ${parts.join(" \u00b7 ")}`;
+    if (typeof document !== "undefined" && kb.embed_endpoint_confirmation_required && kb.embed_previous_identity && kb.embed_current_identity) {
+      for (const [action, label] of [["reuse", "Reuse existing vectors"], ["rebuild", "Rebuild vectors"]]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ccb-btn";
+        button.textContent = label;
+        button.addEventListener("click", () => confirmKbEmbedding(action, kb.embed_previous_identity, kb.embed_current_identity));
+        element.appendChild(button);
+      }
+    }
     const panelOpen = state.dom.panel.classList.contains("ccb-open");
     clearTimeout(state.kbTimer);
     if (kb.building) {
@@ -3568,6 +3790,24 @@ async function refreshKbStatus() {
   }
 }
 
+async function confirmKbEmbedding(action, previousIdentity, currentIdentity) {
+  const element = state.dom.root.querySelector("#ccb-kb-status");
+  if (element) element.appendChild(document.createTextNode("\nApplying embedding choice…"));
+  try {
+    const response = await assistantFetchApi("/chatbot/kb/embedding/confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, previous_identity: previousIdentity, current_identity: currentIdentity }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    clearTimeout(state.kbTimer);
+    state.kbTimer = setTimeout(refreshKbStatus, 800);
+  } catch (error) {
+    if (element) element.textContent = `Knowledge base: ${error.message}`;
+  }
+}
+
 async function rebuildKb(syncOfficial) {
   const element = state.dom.root.querySelector("#ccb-kb-status");
   if (element) {
@@ -3575,7 +3815,7 @@ async function rebuildKb(syncOfficial) {
   }
   try {
     const route = syncOfficial ? "/chatbot/kb/sync_official" : "/chatbot/kb/rebuild";
-    await api.fetchApi(route, {
+    await assistantFetchApi(route, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(collectSettings().kb),
@@ -3591,7 +3831,7 @@ async function compactKb() {
   const element = state.dom.root.querySelector("#ccb-kb-status");
   if (element) element.textContent = "Knowledge base: compacting\u2026 (this can take a moment)";
   try {
-    const response = await api.fetchApi("/chatbot/kb/compact", {
+    const response = await assistantFetchApi("/chatbot/kb/compact", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: "{}",
@@ -3616,9 +3856,12 @@ let _workflowSessionSeq = 0;
 function resolveWorkflowKey() {
   // Ownership contract and regression checklist: docs/workflow-chat-ownership.md.
   // Prefer the current store over a possibly stale legacy manager.
-  const workflow = app.extensionManager?.workflow?.activeWorkflow || app.workflowManager?.activeWorkflow;
+  const workflow = (app.extensionManager?.workflow ?? app.workflowManager)?.activeWorkflow;
   if (!workflow || typeof workflow !== "object") return null;
-  if (_workflowSessionKeys.has(workflow)) return _workflowSessionKeys.get(workflow);
+  // Only legacy fallback identities freeze. Modern objects can be reset to a
+  // different workflow ID by ComfyUI while retaining their object identity.
+  const cached = _workflowSessionKeys.get(workflow);
+  if (cached && !cached.startsWith("id:")) return cached;
   // ComfyUI restores this UUID with unsaved drafts. Never use app.graph.id:
   // the shared canvas can still contain the previous tab during activation.
   let id = workflow.activeState?.id || workflow.initialState?.id;
@@ -3629,6 +3872,7 @@ function resolveWorkflowKey() {
   const isTemporary = workflow.isTemporary === true || workflow.size === -1;
   // Do not freeze a random identity while modern ComfyUI is still loading it.
   if (!id && workflow.isLoaded === false) return null;
+  if (!id && isTemporary && app.extensionManager?.workflow) return null;
   const key = typeof id === "string" && id.trim() ? `id:${id.trim()}`
     : path && !isTemporary ? `path:${path}` : `tmp:${_workflowSessionNonce}:${++_workflowSessionSeq}`;
   _workflowSessionKeys.set(workflow, key);
@@ -3656,30 +3900,51 @@ function renderHistory() {
       view.summary.textContent = `Thinking\u2026 (${reasoning.length.toLocaleString()} chars)`;
     }
   }
+  updateCompactionButton();
 }
 
 async function loadHistory() {
+  if (state.busy || state.requestActive || state.workflowTestRunning) return;
   const key = state.sessionKey || resolveWorkflowKey();
   if (!key) return;
   state.sessionKey = key;
   const revision = state.historyRevision = (state.historyRevision || 0) + 1;
   state.historyLoading = true;
   let messages = [];
+  let failed = false;
   try {
     await state.historyWrites?.get(key);
-    const response = await api.fetchApi(`/chatbot/history?key=${encodeURIComponent(key)}`);
-    const payload = await response.json();
-    messages = Array.isArray(payload.history) ? payload.history : [];
-  } catch { /* keep this session empty on a failed read */ }
+    const unsaved = state.unsavedHistories?.get(key);
+    if (unsaved) {
+      messages = JSON.parse(unsaved).messages;
+    } else {
+      const response = await assistantFetchApi(`/chatbot/history?key=${encodeURIComponent(key)}`);
+      if (response.ok === false) throw new Error(`History request failed (${response.status}).`);
+      const payload = await response.json();
+      if (!Array.isArray(payload.history)) throw new Error("Invalid history response.");
+      messages = payload.history;
+    }
+  } catch { failed = true; }
   if (state.sessionKey !== key || state.historyRevision !== revision) return;
+  // A load started during setup can resolve after some other path has begun a
+  // request. Never replace the request's working transcript with startup data.
+  if (state.busy || state.requestActive || state.workflowTestRunning) {
+    state.historyLoading = false;
+    return;
+  }
   state.historyLoading = false;
+  state.historyLoadFailed = failed;
+  if (failed) {
+    appendNotice("Could not load this workflow's chat. Send or New will retry; saved history has not been replaced.");
+    return;
+  }
   state.messages = messages;
   renderHistory();
   updateContextStatus();
 }
 
 async function switchSession(newKey) {
-  if (!newKey || newKey === state.sessionKey) {
+  if (newKey === state.sessionKey) {
     state.pendingSessionKey = null;
     return;
   }
@@ -3697,6 +3962,7 @@ async function switchSession(newKey) {
   state.sessionKey = newKey;
   state.pendingSessionKey = null;
   state.messages = [];
+  state.historyLoadFailed = false;
   state.attachments = draft?.attachments || [];
   if (state.dom?.input) {
     state.dom.input.value = draft?.text || "";
@@ -3705,10 +3971,14 @@ async function switchSession(newKey) {
   state.botHighlightedIds = [];
   renderAttachments();
   renderHistory();
-  await loadHistory();
+  if (newKey) await loadHistory();
+  else {
+    state.historyRevision = (state.historyRevision || 0) + 1;
+    state.historyLoading = false;
+  }
   await saved;
   if (state.sessionKey !== newKey) return;
-  if (!state.messages.length) appendNotice("New chat session for this workflow.");
+  if (newKey && !state.historyLoadFailed && !state.messages.length) appendNotice("New chat session for this workflow.");
   scrollMessages();
 }
 
@@ -3716,12 +3986,12 @@ async function flushPendingSessionSwitch() {
   if (state.busy || state.requestActive || state.workflowTestRunning) return;
   state.pendingSessionKey = null;
   const key = resolveWorkflowKey();
-  if (key) await switchSession(key);
+  await switchSession(key);
 }
 
 function onWorkflowMaybeChanged() {
   const key = resolveWorkflowKey();
-  if (!key || key === state.sessionKey) { state.pendingSessionKey = null; return; }
+  if (key === state.sessionKey) { state.pendingSessionKey = null; return; }
   if (state.busy || state.requestActive || state.workflowTestRunning) {
     state.pendingSessionKey = key;
     return;
@@ -3770,30 +4040,44 @@ function setupCanvasCoexistence() {
 async function saveHistory(keyOverride) {
   // Never guess a message owner's key from whichever canvas is now active.
   const key = keyOverride || state.sessionKey;
-  if (!key || key === "__default__") return;
-  const messages = state.messages.map((message) => {
-    const copy = { role: message.role, content: message.content };
-    if (message.tool_calls) copy.tool_calls = message.tool_calls;
-    if (message.tool_call_id) copy.tool_call_id = message.tool_call_id;
-    if (message.reasoning) copy.reasoning = String(message.reasoning);
-    if (message.images?.length || message.image_count) copy.image_count = message.images?.length || message.image_count;
-    if (message.synthetic) copy.synthetic = true;
-    if (message.steer) copy.steer = true;
-    return copy;
-  });
+  if (!key || key === "__default__" || state.historyLoading || state.historyLoadFailed) return;
+  const messages = state.messages.map(historyMessageSnapshot);
   const body = JSON.stringify({ key, messages });
+  state.unsavedHistories ||= new Map();
   state.historyWrites ||= new Map();
   const previous = state.historyWrites.get(key) || Promise.resolve();
   const write = previous.catch(() => {}).then(async () => {
     try {
-      await api.fetchApi("/chatbot/history", {
+      const response = await assistantFetchApi("/chatbot/history", {
         method: "POST", headers: { "Content-Type": "application/json" }, body,
       });
-    } catch { /* history persistence is best-effort */ }
+      if (response?.ok === false) throw new Error("History save failed.");
+      state.unsavedHistories.delete(key);
+    } catch {
+      state.unsavedHistories.set(key, body);
+      if (state.sessionKey === key) appendNotice("Chat could not be saved. It is retained in this browser session; keep this page open and retry later.");
+    }
   });
   state.historyWrites.set(key, write);
   await write;
   if (state.historyWrites.get(key) === write) state.historyWrites.delete(key);
+}
+
+function historyMessageSnapshot(message) {
+  const copy = { role: message.role, content: message.content };
+  if (message.tool_calls) copy.tool_calls = message.tool_calls;
+  if (message.tool_call_id) copy.tool_call_id = message.tool_call_id;
+  if (message.reasoning) copy.reasoning = String(message.reasoning);
+  if (message.images?.length || message.image_count) copy.image_count = message.images?.length || message.image_count;
+  if (message.synthetic) copy.synthetic = true;
+  if (message.steer) copy.steer = true;
+  if (Array.isArray(message.compaction_archive)) {
+    copy.compaction_archive = message.compaction_archive.map(historyMessageSnapshot);
+    if (Number.isInteger(message.compaction_tail_count) && message.compaction_tail_count >= 0) {
+      copy.compaction_tail_count = message.compaction_tail_count;
+    }
+  }
+  return copy;
 }
 
 function estimateTokens(text) {
@@ -3867,7 +4151,7 @@ function transcriptForSummary(messages) {
 }
 
 async function requestSummary(messages) {
-  const response = await api.fetchApi("/chatbot/summarize", {
+  const response = await assistantFetchApi("/chatbot/summarize", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text: transcriptForSummary(messages) }),
@@ -3877,28 +4161,107 @@ async function requestSummary(messages) {
   return payload.summary || "";
 }
 
-async function compactContext() {
+function compactArchiveMessage() {
+  return [...state.messages].reverse().find((message) => Array.isArray(message.compaction_archive));
+}
+
+function updateCompactionButton() {
+  const button = state.dom?.compactChat;
+  if (!button) return;
+  const canRestore = Boolean(compactArchiveMessage());
+  button.textContent = canRestore ? "Restore" : "Compact";
+  button.title = canRestore ? "Restore the full conversation saved before compaction" : "Compact this chat while keeping a restorable archive";
+  button.disabled = Boolean(state.compactionInProgress || state.busy || state.requestActive || state.workflowTestRunning || state.historyLoading);
+}
+
+async function compactChat() {
+  if (state.busy || state.requestActive || state.workflowTestRunning || state.historyLoading || state.historyLoadFailed || state.llmUnloading || state.compactionInProgress) {
+    appendNotice("Wait for the current chat or workflow task to finish before compacting.");
+    return false;
+  }
+  const archive = compactArchiveMessage();
+  if (archive) return restorePreviousChat();
+  const owner = resolveWorkflowKey();
+  if (!owner || owner !== state.sessionKey) {
+    appendNotice("Wait for the active workflow chat to finish loading before compacting.");
+    return false;
+  }
+  state.compactionInProgress = true;
+  updateCompactionButton();
+  try {
+    const compacted = await compactContext({ manual: true });
+    if (!compacted) appendNotice("There is not enough earlier chat to compact, or the chat changed before the summary finished.");
+    return compacted;
+  } catch (error) {
+    appendNotice(`Compaction failed: ${error.message}`);
+    return false;
+  } finally {
+    state.compactionInProgress = false;
+    updateCompactionButton();
+  }
+}
+
+async function restorePreviousChat() {
+  if (state.busy || state.requestActive || state.workflowTestRunning || state.historyLoading || state.compactionInProgress) {
+    appendNotice("Wait for the current chat or workflow task to finish before restoring.");
+    return false;
+  }
+  const owner = resolveWorkflowKey();
+  if (!owner || owner !== state.sessionKey) return false;
+  const archive = compactArchiveMessage();
+  if (!archive) return false;
+  const retainedTail = Math.max(0, Number(archive.compaction_tail_count) || 0);
+  const messagesAfterRetainedTail = state.messages.slice(1 + retainedTail);
+  state.messages = [...archive.compaction_archive, ...messagesAfterRetainedTail];
+  renderHistory();
+  updateContextStatus();
+  updateCompactionButton();
+  appendNotice("Restored the full conversation saved before compaction.");
+  await saveHistory(owner);
+  return true;
+}
+
+async function compactContext({ manual = false } = {}) {
+  const owner = state.sessionKey;
+  const historyRevision = state.historyRevision || 0;
+  const originalReference = state.messages;
+  const archive = originalReference.map(historyMessageSnapshot);
+  const originalJson = JSON.stringify(archive);
   const keepLast = Math.max(4, Number(state.config?.context?.keep_last) || 12);
-  if (state.messages.length <= keepLast + 2) return false;
-  let splitIndex = state.messages.length - keepLast;
-  while (splitIndex > 0 && state.messages[splitIndex]?.role === "tool") splitIndex -= 1;
+  if (originalReference.length <= keepLast + 2) return false;
+  let splitIndex = originalReference.length - keepLast;
+  while (splitIndex > 0 && originalReference[splitIndex]?.role === "tool") splitIndex -= 1;
   while (
     splitIndex > 0 &&
-    state.messages[splitIndex - 1]?.role === "assistant" &&
-    state.messages[splitIndex - 1]?.tool_calls?.length
+    originalReference[splitIndex - 1]?.role === "assistant" &&
+    originalReference[splitIndex - 1]?.tool_calls?.length
   ) {
     splitIndex -= 1;
   }
-  const older = state.messages.slice(0, splitIndex);
+  const older = originalReference.slice(0, splitIndex);
   if (!older.length) return false;
   const summary = await requestSummary(older);
   if (!summary) return false;
+  if (
+    state.sessionKey !== owner ||
+    (state.historyRevision || 0) !== historyRevision ||
+    state.messages !== originalReference ||
+    JSON.stringify(state.messages.map(historyMessageSnapshot)) !== originalJson ||
+    (manual && resolveWorkflowKey() !== owner) ||
+    (manual && (state.busy || state.requestActive || state.workflowTestRunning))
+  ) return false;
   state.messages = [
-    { role: "system", content: `Summary of earlier conversation:\n${summary}` },
-    ...state.messages.slice(splitIndex),
+    {
+      role: "system",
+      content: `Summary of earlier conversation:\n${summary}`,
+      compaction_archive: archive,
+      compaction_tail_count: originalReference.length - splitIndex,
+    },
+    ...originalReference.slice(splitIndex),
   ];
   appendNotice("Compacted the earlier conversation to fit the model context.");
   updateContextStatus();
+  updateCompactionButton();
   await saveHistory();
   return true;
 }
@@ -3926,7 +4289,7 @@ async function detectContextWindow() {
     return;
   }
   try {
-    const response = await api.fetchApi("/chatbot/context", {
+    const response = await assistantFetchApi("/chatbot/context", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...collectSettings(), model }),
@@ -3955,7 +4318,7 @@ function updateMemoryStatus(embedding) {
 
 async function reindexLessons() {
   try {
-    const response = await api.fetchApi("/chatbot/memory/reindex", {
+    const response = await assistantFetchApi("/chatbot/memory/reindex", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -3970,7 +4333,7 @@ async function reindexLessons() {
 async function loadLessons() {
   let embedding = null;
   try {
-    const response = await api.fetchApi("/chatbot/memory");
+    const response = await assistantFetchApi("/chatbot/memory");
     const payload = await response.json();
     state.lessons = Array.isArray(payload.lessons) ? payload.lessons : [];
     embedding = payload.embedding || null;
@@ -3978,10 +4341,6 @@ async function loadLessons() {
     state.lessons = [];
   }
   updateMemoryStatus(embedding);
-  if (!state.lessonReindexRequested && state.config?.memory?.embed?.enabled !== false) {
-    state.lessonReindexRequested = true;
-    void reindexLessons();
-  }
   renderMemoryList();
 }
 
@@ -3992,7 +4351,7 @@ async function refreshRelevantLessons(query) {
   }
   const limit = Number(state.config?.memory?.inject_limit) || 0;
   try {
-    const response = await api.fetchApi("/chatbot/memory/relevant", {
+    const response = await assistantFetchApi("/chatbot/memory/relevant", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query: query || "", limit }),
@@ -4006,7 +4365,7 @@ async function refreshRelevantLessons(query) {
 
 async function rememberLesson(text, tags, pinned) {
   if (!text) return { error: "Missing lesson text." };
-  const response = await api.fetchApi("/chatbot/memory", {
+  const response = await assistantFetchApi("/chatbot/memory", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action: "add", text, tags: tags || "", source: "assistant", pinned: pinned === true }),
@@ -4025,7 +4384,7 @@ async function rememberLesson(text, tags, pinned) {
 }
 
 async function searchMemory(query, limit) {
-  const response = await api.fetchApi("/chatbot/memory/search", {
+  const response = await assistantFetchApi("/chatbot/memory/search", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query, limit }),
@@ -4099,19 +4458,26 @@ function experienceFragment() {
   return { nodes, links: fragmentLinks };
 }
 
-function trackRunSubmit(promptId) {
-  if (state.config?.experience?.enabled === false) return;
-  const promptKey = String(promptId || "");
-  if (!promptKey || state.pendingRuns.has(promptKey)) return;
+function captureRunContext() {
+  if (state.config?.experience?.enabled === false) return null;
+  const workflowKey = resolveWorkflowKey();
+  // Node IDs from an assistant run belong only to that run's workflow.
+  if (!workflowKey || workflowKey !== state.sessionKey || workflowKey !== state.runNodeOwner) return null;
   const fragment = experienceFragment();
-  if (!fragment) return;
-  state.pendingRuns.set(promptKey, {
-    prompt_id: promptKey,
+  if (!fragment) return null;
+  return JSON.parse(JSON.stringify({
     fragment,
     models: experienceModels(fragment),
-    workflow_key: resolveWorkflowKey() || "",
+    workflow_key: workflowKey,
     task: state.runTaskText || lastUserTask(),
-  });
+  }));
+}
+
+function trackRunSubmit(promptId, captured) {
+  const promptKey = String(promptId || "");
+  if (!promptKey || state.pendingRuns.has(promptKey)) return;
+  const entry = captured === undefined ? captureRunContext() : captured;
+  if (entry) state.pendingRuns.set(promptKey, { ...entry, prompt_id: promptKey });
 }
 
 function installRunCapture() {
@@ -4119,9 +4485,11 @@ function installRunCapture() {
   state.runCaptureInstalled = true;
   const original = api.queuePrompt.bind(api);
   api.queuePrompt = async (...args) => {
+    let captured = null;
+    try { captured = captureRunContext(); } catch { /* capture must never prevent queuing */ }
     const response = await original(...args);
     const promptId = response?.prompt_id || response?.promptId;
-    if (promptId) trackRunSubmit(promptId);
+    if (promptId) trackRunSubmit(promptId, captured);
     return response;
   };
 }
@@ -4163,7 +4531,7 @@ async function refreshRelevantExperiences(task) {
   }
   const limit = Number(state.config?.experience?.recall_limit) || 0;
   try {
-    const response = await api.fetchApi("/chatbot/experience/relevant", {
+    const response = await assistantFetchApi("/chatbot/experience/relevant", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ task: task || "", limit }),
@@ -4176,7 +4544,7 @@ async function refreshRelevantExperiences(task) {
 }
 
 async function recallExperience(query, limit) {
-  const response = await api.fetchApi("/chatbot/experience/relevant", {
+  const response = await assistantFetchApi("/chatbot/experience/relevant", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ task: query, limit: limit ?? 0 }),
@@ -4196,7 +4564,7 @@ async function completeRun(entry, status, detail) {
         .join(": ")
     : "";
   try {
-    const response = await api.fetchApi("/chatbot/experience", {
+    const response = await assistantFetchApi("/chatbot/experience", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -4222,6 +4590,8 @@ async function completeRun(entry, status, detail) {
 }
 
 async function askRunApproval(id, entry) {
+  // Other workflows can finish in the background. Their verdict remains available in Settings.
+  if (entry.workflow_key !== state.sessionKey || entry.workflow_key !== resolveWorkflowKey()) return;
   const answer = await appendChatCard("Did this run give the result you wanted?", [
     { label: "Approve", value: "approved", class: "ccb-primary" },
     { label: "Not quite", value: "rejected" },
@@ -4229,7 +4599,7 @@ async function askRunApproval(id, entry) {
   ]);
   if (!answer || answer === "skip") return;
   try {
-    await api.fetchApi("/chatbot/experience/verdict", {
+    await assistantFetchApi("/chatbot/experience/verdict", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -4259,7 +4629,7 @@ function updateExperienceStatus(embedding) {
 
 async function reindexExperiences() {
   try {
-    const response = await api.fetchApi("/chatbot/experience/reindex", {
+    const response = await assistantFetchApi("/chatbot/experience/reindex", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -4274,7 +4644,7 @@ async function reindexExperiences() {
 async function loadExperiences() {
   let embedding = null;
   try {
-    const response = await api.fetchApi("/chatbot/experience");
+    const response = await assistantFetchApi("/chatbot/experience");
     const payload = await response.json();
     state.experience = Array.isArray(payload.experiences) ? payload.experiences : [];
     embedding = payload.embedding || null;
@@ -4282,11 +4652,6 @@ async function loadExperiences() {
     state.experience = [];
   }
   updateExperienceStatus(embedding);
-  if (!state.experienceReindexRequested && state.config?.experience?.enabled !== false
-      && state.config?.memory?.embed?.enabled !== false) {
-    state.experienceReindexRequested = true;
-    void reindexExperiences();
-  }
   renderExperienceList();
 }
 
@@ -4325,7 +4690,7 @@ async function pruneExperiences() {
     return;
   }
   try {
-    const response = await api.fetchApi("/chatbot/experience/prune", {
+    const response = await assistantFetchApi("/chatbot/experience/prune", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ keep }),
@@ -4341,7 +4706,7 @@ async function pruneExperiences() {
 }
 
 async function updateExperience(payload) {
-  const response = await api.fetchApi("/chatbot/experience/manage", {
+  const response = await assistantFetchApi("/chatbot/experience/manage", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -4354,7 +4719,7 @@ async function updateExperience(payload) {
 }
 
 async function getConsoleLog(lines, level) {
-  const response = await api.fetchApi("/chatbot/console", {
+  const response = await assistantFetchApi("/chatbot/console", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ lines, level }),
@@ -4368,7 +4733,7 @@ async function getConsoleLog(lines, level) {
 }
 
 async function updateMemory(payload) {
-  const response = await api.fetchApi("/chatbot/memory", {
+  const response = await assistantFetchApi("/chatbot/memory", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -4419,13 +4784,13 @@ function lessonsContext() {
 }
 
 async function unloadLlm(quiet = false) {
-  if (state.busy || state.requestActive || state.workflowTestRunning || state.llmUnloading) {
+  if (state.busy || state.requestActive || state.workflowTestRunning || state.llmUnloading || state.compactionInProgress) {
     if (!quiet) appendNotice("Wait for the assistant to finish before unloading the model.");
     return { skipped: true };
   }
   state.llmUnloading = true;
   try {
-    const response = await api.fetchApi("/chatbot/unload", {
+    const response = await assistantFetchApi("/chatbot/unload", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
@@ -4448,9 +4813,7 @@ async function unloadLlm(quiet = false) {
   }
 }
 
-app.registerExtension({
-  name: "ComfyUI.Assistant",
-  async setup() {
+function setupAssistant() {
     buildUi();
     window.addEventListener("error", (event) => {
       debugLog("ui", "error", { message: String(event.message || ""), line: event.lineno });
@@ -4499,15 +4862,41 @@ app.registerExtension({
     state.historyLoading = true;
     startSessionWatcher();
     setupCanvasCoexistence();
+    void initializeAssistantData();
+}
+
+app.registerExtension({ name: "ComfyUI.Assistant", setup: setupAssistant });
+
+async function initializeAssistantData() {
+  try {
+    await loadConfig();
+  } catch (error) {
+    debugLog("ui", "initialization_failed", { section: "configuration", error: String(error?.message || error) });
+    setStatus(`Initialization failed: ${error.message}`);
+  }
+  const tasks = [
+    ["history", loadHistory],
+    ["lessons", loadLessons],
+    ["experiences", loadExperiences],
+  ];
+  await Promise.all(tasks.map(async ([name, load]) => {
     try {
-      await loadConfig();
-      await loadHistory();
-      await loadLessons();
-      await loadExperiences();
-      await refreshRelevantLessons("");
-      refreshModels();
+      await load();
     } catch (error) {
-      setStatus(`Initialization failed: ${error.message}`);
+      debugLog("ui", "initialization_failed", { section: name, error: String(error?.message || error) });
     }
-  },
-});
+  }));
+}
+
+async function startKbOnAssistantOpen() {
+  if (state.kbStartupRequested) return;
+  state.kbStartupRequested = true;
+  try {
+    const response = await assistantFetchApi("/chatbot/kb/start", { method: "POST" });
+    if (response.ok === false) throw new Error(`HTTP ${response.status}`);
+    void refreshKbStatus();
+  } catch (error) {
+    state.kbStartupRequested = false;
+    debugLog("kb", "lazy_start_failed", { error: String(error?.message || error) });
+  }
+}
