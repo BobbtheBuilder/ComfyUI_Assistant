@@ -1,3 +1,5 @@
+<p align="center"><img src="ComfyUI%20Assistant%20Robot%20Logo.png" alt="ComfyUI Assistant logo" width="320"></p>
+
 # ComfyUI Assistant
 
 A floating chat assistant embedded in the ComfyUI graph editor. It can read and edit your workflow,
