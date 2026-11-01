@@ -519,3 +519,10 @@ https://github.com/BobbtheBuilder/ComfyUI_Assistant/issues
 Each workflow owns its chat. Keep its history, draft, and active request with that workflow
 when switching tabs or restoring a workflow, and preserve the existing LLM busy/typing
 indicator when changing chat handling.
+
+
+## ComfyArt workflow builds
+
+The optional ComfyArt Assistant bridge can use `workflow_builder.build_workflow` directly without opening the Assistant panel. It reuses this assistant's configured chat provider, node catalog and knowledge-base search, with a tool set limited to installed-node lookup, documentation search and API-workflow submission. It builds a detached graph; it never edits your open workflow or runs generation. The bridge returns the graph to the main ComfyArt chat for its existing check/install flow.
+
+The chat and embedding connections remain separate. `COMFYART_ASSISTANT_BUILD_ROUNDS` sets the tool-loop budget (12 by default, 0 for unlimited); no extra model loading, generation or stream-idle deadline is added. Provider cancellation is propagated when the bridge cancels a job.
