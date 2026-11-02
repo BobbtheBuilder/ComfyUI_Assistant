@@ -7,13 +7,13 @@ const vm = require("node:vm");
 const source = fs.readFileSync(path.join(__dirname, "../web/chatbot.js"), "utf8");
 
 function load(names, overrides = {}) {
-  const context = vm.createContext({ TextDecoder, AbortController, DOMException, ...overrides });
+  const context = vm.createContext({ TextDecoder, AbortController, DOMException, performance, crypto: require("node:crypto"), ...overrides });
   if (!overrides.assistantFetchApi) {
     context.assistantFetchApi = (...args) => context.api.fetchApi(...args);
   }
   const snapshotStart = source.search(/^function historyMessageSnapshot\(/m);
   vm.runInContext(source.slice(snapshotStart, source.indexOf("\n}", snapshotStart) + 2), context);
-  for (const name of names) {
+  for (const name of new Set(["timedBuildPhase", ...names])) {
     const start = source.search(new RegExp(`^(?:async )?function ${name}\\(`, "m"));
     assert.notEqual(start, -1, `Missing function ${name}`);
     vm.runInContext(source.slice(start, source.indexOf("\n}", start) + 2), context);
@@ -31,6 +31,32 @@ function responseFor(chunks) {
   };
   return { reader, response: { ok: true, body: { getReader: () => reader } } };
 }
+
+test("build timing includes fixups without logging conversation content", async () => {
+  const records = [];
+  const state = { config: {}, runMutatedGraph: true, fixPasses: 0, messages: [] };
+  let validations = 0;
+  let c;
+  c = load(["runAgentWithFixups"], {
+    state, crypto: undefined, debugEnabled: () => true,
+    runAgent: metrics => c.timedBuildPhase(metrics, "model", async () => {}),
+    validateWorkflow: async () => ({ ok: ++validations > 1, counts: { unconnected: 1, dangling: 0 } }),
+    validationMessage: () => "private graph detail", autoLayoutIfNeeded() {},
+    appendNotice() {}, saveHistory: async () => {},
+    appendBubble: (_role, text) => { throw new Error(text); },
+    debugLog: (category, event, data) => records.push({ category, event, data }),
+  });
+  await c.runAgentWithFixups();
+  assert.equal(records.length, 1);
+  assert.equal(records[0].data.entry_point, "frontend");
+  assert.equal(typeof records[0].data.build_id, "string");
+  assert.equal(records[0].data.outcome, "success");
+  assert.equal(records[0].data.counts.model, 2);
+  assert.equal(records[0].data.counts.validation, 2);
+  assert.equal(records[0].data.counts.fixup_passes, 1);
+  assert.ok(records[0].data.elapsed_ms >= 0);
+  assert.ok(!JSON.stringify(records).includes("private graph detail"));
+});
 
 test("assistant requests use the configured timeout override and preserve cancellation", async () => {
   const controller = new AbortController();
@@ -841,12 +867,17 @@ test("normal agent uses concurrent lookups and keeps tool messages ordered", asy
     extractInlineActions: () => [], saveHistory: async () => {}, scrollMessages: () => {},
     appendBubble: (_role, text) => { throw new Error(text); },
   });
-  const pending = c.runAgent();
+  const metrics = { phases_ms: {}, counts: {} };
+  const pending = c.runAgent(metrics);
   await new Promise(setImmediate);
   assert.deepEqual(started, ["search_docs", "get_node_docs"]);
   finish.get_node_docs("second");
   finish.search_docs("first");
   await pending;
+  assert.equal(metrics.counts.model, 2);
+  assert.equal(metrics.counts["tool.search_docs"], 1);
+  assert.ok(metrics.phases_ms.serialization >= 0);
+  assert.equal(metrics.counts.tool_result_chars, 15);
   assert.deepEqual(state.messages.filter(item => item.role === "tool").map(item => [item.tool_call_id, item.content]),
     [["0", '"first"'], ["1", '"second"']]);
 });

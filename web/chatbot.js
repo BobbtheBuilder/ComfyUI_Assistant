@@ -2376,7 +2376,18 @@ function flushInjections() {
   return queued.length;
 }
 
-async function runAgent() {
+async function timedBuildPhase(metrics, phase, operation) {
+  if (!metrics) return operation();
+  const started = performance.now();
+  try {
+    return await operation();
+  } finally {
+    metrics.phases_ms[phase] = (metrics.phases_ms[phase] || 0) + performance.now() - started;
+    metrics.counts[phase] = (metrics.counts[phase] || 0) + 1;
+  }
+}
+
+async function runAgent(metrics = null) {
   state.verifiedNodeTypes = new Set();
   const runId = (state.runId += 1);
   state.cancelled = false;
@@ -2386,15 +2397,15 @@ async function runAgent() {
     while (true) {
       if (state.cancelled || state.runId !== runId) return;
       flushInjections();
-      const { text, toolCalls, reasoning } = await streamAssistantReply();
+      const { text, toolCalls, reasoning } = await timedBuildPhase(metrics, "model", streamAssistantReply);
       if (state.cancelled || state.runId !== runId) return;
       if (!toolCalls.length) {
         const inline = extractInlineActions(text);
         if (inline.length) {
           state.messages.push({ role: "assistant", content: text, reasoning });
           await runToolBatch(inline,
-            (call) => runTool(call.name, call.arguments),
-            (call, result) => recordToolResult(call.name, result),
+            (call) => timedBuildPhase(metrics, `tool.${call.name}`, () => runTool(call.name, call.arguments)),
+            (call, result) => recordToolResult(call.name, result, undefined, metrics),
             () => state.cancelled || state.runId !== runId);
           continue;
         }
@@ -2411,8 +2422,8 @@ async function runAgent() {
         tool_calls: toolCalls.map(toOpenAiToolCall),
       });
       await runToolBatch(toolCalls,
-        (call) => runTool(call.name, safeParse(call.arguments)),
-        (call, result) => recordToolResult(call.name, result, call.id),
+        (call) => timedBuildPhase(metrics, `tool.${call.name}`, () => runTool(call.name, safeParse(call.arguments))),
+        (call, result) => recordToolResult(call.name, result, call.id, metrics),
         () => state.cancelled || state.runId !== runId);
     }
     if (state.cancelled) {
@@ -2423,6 +2434,7 @@ async function runAgent() {
     if (state.cancelled || error?.name === "AbortError") {
       appendNotice("Cancelled.");
     } else {
+      if (metrics) metrics.outcome = "error";
       appendBubble("error", String(error?.message || error));
     }
   } finally {
@@ -2444,28 +2456,35 @@ function autoLayoutIfNeeded() {
 }
 
 async function runAgentWithFixups() {
+  const metrics = debugEnabled() ? {
+    build_id: globalThis.crypto?.randomUUID?.() || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+    entry_point: "frontend", started: performance.now(),
+    phases_ms: {}, counts: { fixup_passes: 0 }, outcome: "success",
+  } : null;
   try {
-    await runAgent();
+    await runAgent(metrics);
     state.correctionHint = false;
     if (state.cancelled) return;
     autoLayoutIfNeeded();
     if (state.config?.validate?.auto_fix === false || !state.runMutatedGraph) return;
     const maxPasses = Math.max(0, Math.min(2, Number(state.config?.validate?.max_passes ?? 1)));
     for (let pass = 0; pass < maxPasses; pass += 1) {
-      const report = await validateWorkflow();
+      const report = await timedBuildPhase(metrics, "validation", validateWorkflow);
       if (report.ok) return;
       state.fixPasses += 1;
+      if (metrics) metrics.counts.fixup_passes += 1;
       appendNotice(
         `Follow-up pass: ${report.counts.unconnected} unconnected input(s), ${report.counts.dangling} dangling link(s).`,
       );
       state.messages.push({ role: "user", content: validationMessage(report), synthetic: true });
       await saveHistory();
-      await runAgent();
+      await runAgent(metrics);
       if (state.cancelled) return;
       autoLayoutIfNeeded();
     }
-    const finalReport = await validateWorkflow();
+    const finalReport = await timedBuildPhase(metrics, "validation", validateWorkflow);
     if (!finalReport.ok) {
+      if (metrics) metrics.outcome = "invalid";
       const names = finalReport.unconnected_required
         .slice(0, 8)
         .map((item) => `${item.type}#${item.id} .${item.input}`);
@@ -2477,7 +2496,15 @@ async function runAgentWithFixups() {
       );
     }
   } catch (error) {
+    if (metrics) metrics.outcome = "error";
     appendBubble("error", String(error?.message || error));
+  } finally {
+    if (metrics) debugLog("performance", "build.finished", {
+      build_id: metrics.build_id, entry_point: metrics.entry_point,
+      outcome: state.cancelled ? "cancelled" : metrics.outcome,
+      elapsed_ms: performance.now() - metrics.started,
+      phases_ms: metrics.phases_ms, counts: metrics.counts,
+    });
   }
 }
 
@@ -2537,8 +2564,13 @@ async function runTool(name, args) {
   return result;
 }
 
-function recordToolResult(name, result, toolCallId) {
+function recordToolResult(name, result, toolCallId, metrics = null) {
+  const started = metrics ? performance.now() : 0;
   const content = safeStringify(result, name === "get_node_docs" ? 0 : limitSetting("tool_result_chars", 0));
+  if (metrics) {
+    metrics.phases_ms.serialization = (metrics.phases_ms.serialization || 0) + performance.now() - started;
+    metrics.counts.tool_result_chars = (metrics.counts.tool_result_chars || 0) + content.length;
+  }
   if (toolCallId) {
     state.messages.push({ role: "tool", tool_call_id: toolCallId, content });
   } else {

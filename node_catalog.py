@@ -44,15 +44,23 @@ def snapshot(attempts: int = 6, delay: float = 0.2) -> tuple[dict[str, Any], dic
     raise last_error if last_error else RuntimeError("Node registry is unavailable.")
 
 
-def record(node_type: str, inventory=None) -> dict[str, Any]:
+def schema_record(node_type: str, inventory=None) -> dict[str, Any]:
+    """Fresh, independently owned schema; no source evidence or evidence fingerprint.
+
+    INPUT_TYPES can change when model files or extension settings change, even
+    when the registry names and class objects are unchanged.
+    """
     mapping, names = inventory if inventory is not None else registry()
-    cls = mapping.get(node_type)
+    return _schema_for_class(node_type, mapping.get(node_type), names)
+
+
+def _schema_for_class(node_type, cls, names):
     if cls is None:
         return {"name": node_type, "available": False, "schema_error": "Not registered in this ComfyUI session."}
     result = {"name": node_type, "display_name": names.get(node_type, node_type), "available": True,
               "python_module": getattr(cls, "RELATIVE_PYTHON_MODULE", cls.__module__),
               "description": str(getattr(cls, "DESCRIPTION", "") or ""),
-              "category": getattr(cls, "CATEGORY", ""), "source_evidence": []}
+              "category": getattr(cls, "CATEGORY", "")}
     try:
         if callable(getattr(cls, "GET_NODE_INFO_V1", None)):
             result.update(cls.GET_NODE_INFO_V1())
@@ -70,7 +78,17 @@ def record(node_type: str, inventory=None) -> dict[str, Any]:
         result["schema_error"] = ""
     except Exception as exc:
         result = {"name": node_type, "display_name": names.get(node_type, node_type), "available": True,
-                  "schema_error": str(exc), "source_evidence": [], "description": ""}
+                  "schema_error": str(exc), "description": ""}
+    return result
+
+
+def record(node_type: str, inventory=None) -> dict[str, Any]:
+    """Evidence-rich record; existing fingerprint semantics are unchanged."""
+    mapping, names = inventory if inventory is not None else registry()
+    cls = mapping.get(node_type)
+    result = _schema_for_class(node_type, cls, names)
+    if not result['available']:
+        return result
     result["source_evidence"] = []
     for kind, obj in (("class", cls), ("execution", getattr(cls, getattr(cls, "FUNCTION", "execute"), None))):
         if obj is None:

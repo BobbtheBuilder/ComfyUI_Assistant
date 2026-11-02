@@ -61,9 +61,47 @@ class CatalogTest(unittest.TestCase):
         self.assertTrue(any(e["kind"] == "execution" and e["line"] > 0 for e in record["source_evidence"]))
         self.assertEqual(len(record["fingerprint"]), 64)
 
+    def test_schema_lookup_is_fresh_and_independent_without_source_files(self):
+        options = ['first.safetensors']
+        class ModelNode(LocalNode):
+            @classmethod
+            def INPUT_TYPES(cls):
+                return {'required': {'model': (options,)}}
+        self.mapping['ModelAlias'] = ModelNode
+        with patch.object(node_catalog.inspect, 'getsourcelines', side_effect=OSError('source unavailable')):
+            first = node_catalog.schema_record('ModelAlias')
+            first['input']['required']['model'][0].append('caller mutation')
+            options.append('new.safetensors')
+            second = node_catalog.schema_record('ModelAlias')
+        self.assertEqual(second['input']['required']['model'][0], ['first.safetensors', 'new.safetensors'])
+        self.assertEqual(second['name'], 'ModelAlias')
+        self.assertEqual(second['schema_error'], '')
+        self.assertNotIn('source_evidence', second)
+        self.assertNotIn('fingerprint', second)
+        self.assertFalse(node_catalog.schema_record('Unknown')['available'])
+        self.assertIn('Missing node dependency', node_catalog.schema_record('BrokenExact')['schema_error'])
+
     def test_modern_alias_is_exact_and_unknown_is_unavailable(self):
         self.assertEqual(node_catalog.record("ModernAlias")["name"], "ModernAlias")
         self.assertFalse(node_catalog.record("Friendly blend")["available"])
+
+    def test_record_keeps_schema_and_evidence_coherent_when_registry_changes(self):
+        for replace in (True, False):
+            mapping = self.mapping
+            class ChangingNode(LocalNode):
+                @classmethod
+                def INPUT_TYPES(cls):
+                    if replace:
+                        mapping['ChangingAlias'] = ModernNode
+                    else:
+                        mapping.pop('ChangingAlias')
+                    return {'required': {'old_input': ('IMAGE',)}}
+            with self.subTest(replace=replace):
+                mapping['ChangingAlias'] = ChangingNode
+                result = node_catalog.record('ChangingAlias')
+                self.assertIn('old_input', result['input']['required'])
+                evidence = next(e for e in result['source_evidence'] if e['kind'] == 'class')
+                self.assertIn('class ChangingNode', evidence['excerpt'])
 
     def test_coverage_exposes_failures_missing_and_unavailable(self):
         self.assertEqual(kb.index_node_schemas(), 2)
